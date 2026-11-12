@@ -4,9 +4,11 @@ import { useEffect, useRef } from 'react';
 // reads better on mobile and gives more vertical room for long forms. Same
 // props as before (show/onClose/title/children/size/footer) so no call site
 // needs to change; `size` now maps to a panel width instead of a dialog size.
+// `side` defaults to 'end' (right, unchanged for every existing caller);
+// pass 'start' for a left-side launcher panel (e.g. the portal's Learning drawer).
 const WIDTH_BY_SIZE = { sm: 380, md: 480, lg: 640, xl: 860 };
 
-export default function Modal({ show, onClose, title, children, size, footer }) {
+export default function Modal({ show, onClose, title, children, size, footer, side }) {
   const backdropRef = useRef(null);
   useEffect(() => {
     function esc(e) { if (e.key === 'Escape') onClose?.(); }
@@ -20,7 +22,7 @@ export default function Modal({ show, onClose, title, children, size, footer }) 
   return (
     <>
       <div
-        className="offcanvas offcanvas-end show"
+        className={`offcanvas offcanvas-${side === 'start' ? 'start' : 'end'} show`}
         tabIndex="-1"
         style={{ width, maxWidth: '92vw', visibility: 'visible' }}
       >

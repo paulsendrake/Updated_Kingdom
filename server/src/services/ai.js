@@ -26,7 +26,17 @@ async function getSettings() {
 async function getClient() {
   const s   = await getSettings();
   const key = (s?.active && s?.api_key) || process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error('AI assistant is not configured. Add your Anthropic API key under Settings → AI Assistant.');
+  if (!key) {
+    // .status matters here: middleware/errorHandler.js only shows err.message
+    // for status < 500 — an unconfigured-AI error has no sensitive detail to
+    // hide, so it should reach the caller as a real message, not a bare
+    // "Internal server error" + correlation id. streamChat() (the /chat SSE
+    // route) catches this directly and uses err.message regardless of
+    // status, so this is safe for that caller too — see its own try/catch.
+    const err = new Error('AI assistant is not configured. Add your Anthropic API key under Settings → AI Assistant.');
+    err.status = 400;
+    throw err;
+  }
   return { client: new Anthropic({ apiKey: key }), model: s?.model || DEFAULT_MODEL };
 }
 
@@ -1033,10 +1043,73 @@ async function streamChat(res, messages, module, appName, user = null) {
   res.end();
 }
 
+// ---------------------------------------------------------------------------
+// One-shot generation — a single non-streaming call, no tool loop, no chat
+// history. Two different shapes of caller:
+//
+//   generateField()     a plain string back, for the "Draft this for me"
+//                        button next to one text field (routes/ai.js's
+//                        POST /generate-field).
+//   draftCurriculum()    strict JSON back (a course outline), for the LMS's
+//                        "Draft with AI" flow (routes/lms.js's
+//                        POST /curriculum-drafts) — the first place this app
+//                        asks Claude for structured data instead of prose or
+//                        a tool call.
+// ---------------------------------------------------------------------------
+
+async function generateField({ fieldLabel, context, existingText }) {
+  const { client, model } = await getClient();
+  const prompt = [
+    `Write the content for a form field labeled "${fieldLabel}".`,
+    context ? `Context: ${context}` : null,
+    existingText ? `The field currently has this draft text — improve or replace it: ${existingText}` : null,
+    'Reply with ONLY the field text itself — no preamble, no quotes, no markdown formatting.',
+  ].filter(Boolean).join('\n');
+
+  const msg = await client.messages.create({
+    model, max_tokens: 1024,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return (msg.content?.[0]?.text || '').trim();
+}
+
+function stripJsonFence(text) {
+  return String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+}
+
+async function draftCurriculum({ topic, audience, goals }) {
+  const { client, model } = await getClient();
+  const prompt = [
+    `Draft a course curriculum outline for a church/ministry learning platform.`,
+    `Topic: ${topic}`,
+    audience ? `Audience: ${audience}` : null,
+    goals ? `Goals: ${goals}` : null,
+    `Reply with ONLY valid JSON (no markdown fences, no prose) matching this exact shape:`,
+    `{"title": string, "subtitle": string, "summary": string, "modules": [{"title": string, "summary": string, "lessons": [{"title": string, "summary": string, "kind": "video"|"reading"|"assignment", "estimatedMinutes": number, "keyPoints": [string]}]}]}`,
+    `Keep it realistic: 2-4 modules, 2-4 lessons each.`,
+  ].filter(Boolean).join('\n');
+
+  const msg = await client.messages.create({
+    model, max_tokens: 4096,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const raw = stripJsonFence(msg.content?.[0]?.text || '');
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_e) {
+    const err = new Error('The assistant did not return a usable curriculum — please try again.');
+    err.status = 400;
+    throw err;
+  }
+  return parsed;
+}
+
 // markdownToHtml, TOOL_POLICY, hasPermission, getToolsForUser, and
 // executeTool are exported for direct testing (security remediation C-05
 // and C-02 regression tests) — none has another external caller.
 module.exports = {
   streamChat, loadKnowledge, getSettings, isAvailable, MASKED, markdownToHtml,
   TOOL_POLICY, hasPermission, getToolsForUser, executeTool,
+  generateField, draftCurriculum,
 };

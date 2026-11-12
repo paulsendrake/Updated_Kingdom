@@ -107,6 +107,9 @@ export const SECTIONS = [
     items: [
       { to: '/admin/lms/courses', label: 'Courses', icon: 'solar:book-2-line-duotone', perm: 'lms.read' },
       { to: '/admin/lms/cohorts', label: 'Cohorts',  icon: 'solar:users-group-rounded-line-duotone', perm: 'lms.read' },
+      { to: '/admin/lms/enrollments', label: 'Enrollments', icon: 'solar:wallet-money-line-duotone', perm: 'lms.read' },
+      { to: '/admin/lms/marking', label: 'Marking', icon: 'solar:clipboard-check-line-duotone', perm: 'lms.read' },
+      { to: '/admin/lms/gradebook', label: 'Gradebook', icon: 'solar:medal-ribbon-star-line-duotone', perm: 'lms.read' },
     ],
   },
   {

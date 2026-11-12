@@ -222,6 +222,11 @@ router.put('/:id/status', requirePermission('subscriptions.write'), async (req, 
     await logActivity({
       userId: req.user.id, entityType: 'subscription', entityId: id,
       action: 'status_changed', description: `Status → ${status}` });
+    if (status === 'canceled' || status === 'completed') {
+      const { revokeLmsAccessIfNeeded } = require('../jobs/billing-cron');
+      const [[sub]] = await db.query('SELECT * FROM subscriptions WHERE id = :id', { id });
+      await revokeLmsAccessIfNeeded(sub);
+    }
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

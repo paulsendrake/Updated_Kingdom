@@ -17,7 +17,10 @@ export default function PortalLearning() {
 
   return (
     <div>
-      <h3 className="fw-bolder mb-1">My Learning</h3>
+      <div className="d-flex justify-content-between align-items-start mb-1">
+        <h3 className="fw-bolder mb-1">My Learning</h3>
+        <Link to="/portal/learning/transcript" className="small">My transcript</Link>
+      </div>
       <p className="text-muted">Courses you've been enrolled in.</p>
 
       {error && <div className="alert alert-danger">{error}</div>}

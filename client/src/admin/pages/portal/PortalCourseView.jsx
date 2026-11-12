@@ -14,23 +14,47 @@ export default function PortalCourseView() {
   const [course, setCourse] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [certificate, setCertificate] = useState(null);
 
   useEffect(() => {
     setLoading(true);
     setError('');
+    setCertificate(null);
     api.get(`/portal/lms/courses/${courseSlug}`)
       .then((r) => setCourse(r.data))
       .catch((e) => setError(parseApiError(e)))
       .finally(() => setLoading(false));
   }, [courseSlug]);
 
+  // Only ever requested once the course is 100% — guards against the
+  // request racing the server-side auto-issue on the very last lesson.
+  useEffect(() => {
+    if (course?.percent !== 100) return;
+    api.get(`/portal/lms/courses/${courseSlug}/certificate`)
+      .then((r) => setCertificate(r.data))
+      .catch(() => setCertificate(null));
+  }, [course?.percent, courseSlug]);
+
   if (loading) return <div className="text-muted">Loading…</div>;
   if (error) return <div className="alert alert-danger">{error}</div>;
   if (!course) return <div className="empty-state">Course not found.</div>;
 
+  // The route is behind portal auth (Bearer token), so a plain <a href>
+  // would 401 — same blob-download pattern already used for the portal's
+  // giving statement (PortalGiving.jsx's downloadStatement()).
+  async function downloadCertificate() {
+    try {
+      const res = await api.get(`/portal/lms/courses/${courseSlug}/certificate.pdf`, { responseType: 'blob' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(res.data);
+      a.download = `certificate-${certificate?.certificate_number || courseSlug}.pdf`;
+      a.click();
+    } catch (_e) { /* button only shows once the certificate check above succeeded */ }
+  }
+
   return (
     <div>
-      <Link to="/portal/learning" className="btn btn-sm btn-light mb-3">← My Learning</Link>
+      <Link to="/portal/learning" className="btn btn-sm btn-outline-dark mb-3">← My Learning</Link>
       <h3 className="fw-bolder mb-1">{course.title}</h3>
       {course.subtitle && <p className="text-muted mb-2">{course.subtitle}</p>}
       {course.summary && <p className="mb-3">{course.summary}</p>}
@@ -42,11 +66,19 @@ export default function PortalCourseView() {
         <span className="small text-muted flex-shrink-0">{course.completedCount} of {course.lessonCount} complete</span>
       </div>
 
-      {course.nextLessonSlug && (
-        <Link to={`/portal/learning/${course.slug}/${course.nextLessonSlug}`} className="btn btn-primary mb-4">
-          {course.completedCount === 0 ? 'Start Course' : 'Continue'}
-        </Link>
-      )}
+      <div className="d-flex flex-wrap gap-2 mb-4">
+        {course.nextLessonSlug && (
+          <Link to={`/portal/learning/${course.slug}/${course.nextLessonSlug}`} className="btn btn-primary">
+            {course.completedCount === 0 ? 'Start Course' : 'Continue'}
+          </Link>
+        )}
+        {certificate && (
+          <button className="btn btn-outline-success" onClick={downloadCertificate}>
+            <iconify-icon icon="solar:diploma-verified-line-duotone" class="me-1"></iconify-icon>
+            Download Certificate
+          </button>
+        )}
+      </div>
 
       {course.modules.map((m) => (
         <div className="card mb-3" key={m.id}>

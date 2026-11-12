@@ -42,6 +42,10 @@ import MembershipTiersList from './admin/pages/MembershipTiersList.jsx';
 import LmsCoursesPage from './admin/pages/LmsCoursesPage.jsx';
 import LmsCourseEditorPage from './admin/pages/LmsCourseEditorPage.jsx';
 import LmsCohortsPage from './admin/pages/LmsCohortsPage.jsx';
+import LmsEnrollmentsPage from './admin/pages/LmsEnrollmentsPage.jsx';
+import LmsMarkingPage from './admin/pages/LmsMarkingPage.jsx';
+import LmsGradebookPage from './admin/pages/LmsGradebookPage.jsx';
+import LmsCurriculumDraftPage from './admin/pages/LmsCurriculumDraftPage.jsx';
 import EventsList from './admin/pages/EventsList.jsx';
 import EventDetail from './admin/pages/EventDetail.jsx';
 import EventCheckIn from './admin/pages/EventCheckIn.jsx';
@@ -83,6 +87,7 @@ import PortalVerifyEmail from './admin/pages/portal/PortalVerifyEmail.jsx';
 import PortalGiving from './admin/pages/portal/PortalGiving.jsx';
 import PortalMembership from './admin/pages/portal/PortalMembership.jsx';
 import PortalLearning from './admin/pages/portal/PortalLearning.jsx';
+import PortalTranscript from './admin/pages/portal/PortalTranscript.jsx';
 import PortalCourseView from './admin/pages/portal/PortalCourseView.jsx';
 import PortalLessonView from './admin/pages/portal/PortalLessonView.jsx';
 import PortalEvents from './admin/pages/portal/PortalEvents.jsx';
@@ -121,6 +126,8 @@ import ShopPage from './frontend/pages/ShopPage.jsx';
 import ProductPage from './frontend/pages/ProductPage.jsx';
 import EventsPage from './frontend/pages/EventsPage.jsx';
 import EventPage from './frontend/pages/EventPage.jsx';
+import CoursePage from './frontend/pages/CoursePage.jsx';
+import CoursesPage from './frontend/pages/CoursesPage.jsx';
 import CartPage from './frontend/pages/CartPage.jsx';
 import CheckoutPage from './frontend/pages/CheckoutPage.jsx';
 import OrderConfirmationPage from './frontend/pages/OrderConfirmationPage.jsx';
@@ -201,6 +208,7 @@ export default function App() {
         <Route path="giving"             element={<PortalGiving />} />
         <Route path="membership"         element={<PortalMembership />} />
         <Route path="learning"                     element={<PortalLearning />} />
+        <Route path="learning/transcript"           element={<PortalTranscript />} />
         <Route path="learning/:courseSlug"          element={<PortalCourseView />} />
         <Route path="learning/:courseSlug/:lessonSlug" element={<PortalLessonView />} />
         <Route path="events"             element={<PortalEvents />} />
@@ -260,6 +268,10 @@ export default function App() {
         <Route path="lms/courses"               element={<PermissionRoute perm="lms.read"><LmsCoursesPage /></PermissionRoute>} />
         <Route path="lms/courses/:id"           element={<PermissionRoute perm="lms.read"><LmsCourseEditorPage /></PermissionRoute>} />
         <Route path="lms/cohorts"               element={<PermissionRoute perm="lms.read"><LmsCohortsPage /></PermissionRoute>} />
+        <Route path="lms/enrollments"            element={<PermissionRoute perm="lms.read"><LmsEnrollmentsPage /></PermissionRoute>} />
+        <Route path="lms/marking"                element={<PermissionRoute perm="lms.read"><LmsMarkingPage /></PermissionRoute>} />
+        <Route path="lms/gradebook"              element={<PermissionRoute perm="lms.read"><LmsGradebookPage /></PermissionRoute>} />
+        <Route path="lms/curriculum/:draftId"    element={<PermissionRoute perm="lms.read"><LmsCurriculumDraftPage /></PermissionRoute>} />
 
         <Route path="recurring-invoices"        element={<PermissionRoute perm="invoices.read"><RecurringInvoicesList /></PermissionRoute>} />
         <Route path="recurring-invoices/:id"    element={<PermissionRoute perm="invoices.read"><RecurringInvoiceDetail /></PermissionRoute>} />
@@ -349,6 +361,8 @@ export default function App() {
         <Route path="/search"     element={<SearchResultsPage />} />
         <Route path="/shop"       element={<ShopPage />} />
         <Route path="/shop/:slug" element={<ProductPage />} />
+        <Route path="/courses" element={<CoursesPage />} />
+        <Route path="/learn/:slug" element={<CoursePage />} />
         <Route path="/events"       element={<EventsPage />} />
         <Route path="/events/:slug" element={<EventPage />} />
         <Route path="/cart"       element={<CartPage />} />

@@ -61,6 +61,28 @@ async function notifyMembershipEvent(eventType, contactId, { tierName, amount, n
   }
 }
 
+// Fires a Learning-module lifecycle trigger (course.released, lesson.completed,
+// course.completed, quiz.passed, quiz.failed) — same best-effort contract as
+// notifyMembershipEvent. Called from lms/runtime.js's notifier port, which is
+// how the vendored LMS engine's own event emission (already implemented in
+// its services, previously unconsumed) reaches this app's automation engine.
+// Keep eventType values in sync with the TRIGGERS list in
+// client/src/admin/pages/AutomationBuilder.jsx so staff can actually select them.
+async function notifyLmsEvent(eventType, contactId, { courseName, lessonName, score } = {}) {
+  if (!contactId) return;
+  try {
+    const { triggerWorkflow } = require('./automations');
+    const [[contact]] = await db.query('SELECT * FROM contacts WHERE id = :id', { id: contactId });
+    if (!contact) return;
+    await triggerWorkflow(eventType, 'contact', contact, {
+      course_name: courseName || null, lesson_name: lessonName || null, score: score ?? null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[constituents] ${eventType} trigger failed for contact #${contactId}:`, e.message);
+  }
+}
+
 // Fires 'pledge.installment_upcoming' ahead of a pledge's next installment —
 // same best-effort contract as notifyMembershipEvent. Keep in sync with the
 // TRIGGERS list in client/src/pages/AutomationBuilder.jsx.
@@ -148,7 +170,7 @@ async function tagInvoicePaymentAsDonation(paymentId) {
 }
 
 module.exports = {
-  ensureConstituentTag, notifyDonationCaptured, notifyMembershipEvent,
+  ensureConstituentTag, notifyDonationCaptured, notifyMembershipEvent, notifyLmsEvent,
   notifyPledgeInstallmentUpcoming, notifyVolunteerComplianceExpiring,
   tagInvoicePaymentAsDonation,
 };

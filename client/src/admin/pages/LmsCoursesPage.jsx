@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../../api/client.js';
 import PageHeader from '../../components/PageHeader.jsx';
 import Modal from '../../components/Modal.jsx';
 import FormErrorBanner from '../../components/FormErrorBanner.jsx';
+import AiDraftButton from '../../components/AiDraftButton.jsx';
 import { toast } from '../../components/Toast.jsx';
 import { parseApiError } from '../../utils/apiError.js';
 import { useAuth } from '../../auth/AuthContext.jsx';
@@ -30,11 +31,72 @@ function blankCourse() {
   };
 }
 
+// "Draft with AI" prompt dialog — asks what the course should cover, then
+// kicks off server/src/services/ai.js's draftCurriculum() and hands off to
+// the review page (LmsCurriculumDraftPage) rather than creating anything
+// here directly — a draft is always staged for review before it becomes a
+// real course.
+function DraftWithAiModal({ onClose }) {
+  const navigate = useNavigate();
+  const [topic, setTopic] = useState('');
+  const [audience, setAudience] = useState('');
+  const [goals, setGoals] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function generate() {
+    if (!topic.trim()) { setError('A topic is required.'); return; }
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await api.post('/lms/curriculum-drafts', {
+        topic: topic.trim(), audience: audience.trim() || null, goals: goals.trim() || null,
+      });
+      navigate(`/admin/lms/curriculum/${data.id}`);
+    } catch (e) {
+      setError(parseApiError(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      show onClose={onClose} title="Draft with AI" size="md"
+      footer={<>
+        <button className="btn btn-outline-dark" onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="btn btn-primary" onClick={generate} disabled={busy}>
+          {busy ? 'Drafting…' : 'Generate outline'}
+        </button>
+      </>}
+    >
+      <FormErrorBanner error={error} />
+      <div className="row g-2">
+        <div className="col-12">
+          <label className="form-label">Topic</label>
+          <input className="form-control" value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="Financial stewardship for new believers" autoFocus />
+        </div>
+        <div className="col-12">
+          <label className="form-label">Audience <span className="text-muted small">(optional)</span></label>
+          <input className="form-control" value={audience} onChange={(e) => setAudience(e.target.value)} placeholder="New members, small group leaders…" />
+        </div>
+        <div className="col-12">
+          <label className="form-label">Goals <span className="text-muted small">(optional)</span></label>
+          <textarea className="form-control" rows="2" value={goals} onChange={(e) => setGoals(e.target.value)} />
+        </div>
+      </div>
+      <div className="form-text mt-2">
+        You'll review and edit the generated outline before any course is created.
+      </div>
+    </Modal>
+  );
+}
+
 export default function LmsCoursesPage() {
   const { can } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [show, setShow] = useState(false);
+  const [showDraftAi, setShowDraftAi] = useState(false);
   const [form, setForm] = useState(blankCourse());
   const [formError, setFormError] = useState('');
   const [busyId, setBusyId] = useState(null);
@@ -107,11 +169,14 @@ export default function LmsCoursesPage() {
       <PageHeader
         title="Courses"
         subtitle="The Learning module's course catalog"
-        actions={can('lms.write') && (
+        actions={can('lms.write') && (<>
+          <button className="btn btn-outline-dark" onClick={() => setShowDraftAi(true)}>
+            <iconify-icon icon="solar:stars-line-duotone" class="me-1"></iconify-icon> Draft with AI
+          </button>
           <button className="btn btn-primary" onClick={openNew}>
             <iconify-icon icon="solar:add-circle-line-duotone" class="me-1"></iconify-icon> New Course
           </button>
-        )}
+        </>)}
       />
 
       <div className="card">
@@ -141,16 +206,16 @@ export default function LmsCoursesPage() {
                     </td>
                     <td className="text-end">
                       <div className="d-flex gap-1 justify-content-end flex-wrap">
-                        <Link to={`/admin/lms/courses/${c.id}`} className="btn btn-sm btn-light" title="Modules & lessons">
+                        <Link to={`/admin/lms/courses/${c.id}`} className="btn btn-sm btn-outline-dark" title="Modules & lessons">
                           <iconify-icon icon="solar:widget-5-line-duotone"></iconify-icon>
                         </Link>
                         {can('lms.write') && (<>
-                          <button className="btn btn-sm btn-light" onClick={() => openEdit(c)} title="Edit">
+                          <button className="btn btn-sm btn-outline-dark" onClick={() => openEdit(c)} title="Edit">
                             <iconify-icon icon="solar:pen-line-duotone"></iconify-icon>
                           </button>
                           {c.status !== 'published' && (
                             <button
-                              className="btn btn-sm btn-light"
+                              className="btn btn-sm btn-outline-dark"
                               disabled={busyId === c.id}
                               onClick={() => setStatus(c, 'published')}
                               title="Publish — needs at least one published lesson"
@@ -159,12 +224,12 @@ export default function LmsCoursesPage() {
                             </button>
                           )}
                           {c.status !== 'archived' && (
-                            <button className="btn btn-sm btn-light" disabled={busyId === c.id} onClick={() => setStatus(c, 'archived')} title="Archive">
+                            <button className="btn btn-sm btn-outline-dark" disabled={busyId === c.id} onClick={() => setStatus(c, 'archived')} title="Archive">
                               <iconify-icon icon="solar:archive-line-duotone"></iconify-icon>
                             </button>
                           )}
                           {c.status === 'archived' && (
-                            <button className="btn btn-sm btn-light" disabled={busyId === c.id} onClick={() => setStatus(c, 'draft')} title="Restore to draft">
+                            <button className="btn btn-sm btn-outline-dark" disabled={busyId === c.id} onClick={() => setStatus(c, 'draft')} title="Restore to draft">
                               <iconify-icon icon="solar:restart-line-duotone"></iconify-icon>
                             </button>
                           )}
@@ -183,9 +248,9 @@ export default function LmsCoursesPage() {
       </div>
 
       <div className="text-muted small mt-2">
-        Building out modules, lessons and quizzes for a course isn't available in this console yet —
-        a course needs at least one published lesson before it can be published. See{' '}
-        <Link to="/admin/lms/cohorts">Cohorts</Link> to enroll contacts and release courses once ready.
+        Click a course to build out its modules, lessons and quizzes — a course needs at least one
+        published lesson before it can be published. See <Link to="/admin/lms/cohorts">Cohorts</Link> to
+        enroll contacts and release courses once ready.
       </div>
 
       <Modal
@@ -194,7 +259,7 @@ export default function LmsCoursesPage() {
         title={form.id ? 'Edit Course' : 'New Course'}
         size="lg"
         footer={<>
-          <button className="btn btn-light" onClick={() => setShow(false)}>Cancel</button>
+          <button className="btn btn-outline-dark" onClick={() => setShow(false)}>Cancel</button>
           <button className="btn btn-primary" onClick={save}>Save</button>
         </>}
       >
@@ -215,6 +280,14 @@ export default function LmsCoursesPage() {
           <div className="col-12">
             <label className="form-label">Description</label>
             <textarea className="form-control" rows="3" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            <div className="mt-1">
+              <AiDraftButton
+                fieldLabel="course description"
+                context={form.title ? `Course title: ${form.title}${form.summary ? `. Summary: ${form.summary}` : ''}` : form.summary}
+                existingText={form.description}
+                onGenerated={(text) => setForm((f) => ({ ...f, description: text }))}
+              />
+            </div>
           </div>
           <div className="col-md-4">
             <label className="form-label">Level</label>
@@ -248,6 +321,8 @@ export default function LmsCoursesPage() {
           </div>
         </div>
       </Modal>
+
+      {showDraftAi && <DraftWithAiModal onClose={() => setShowDraftAi(false)} />}
     </div>
   );
 }

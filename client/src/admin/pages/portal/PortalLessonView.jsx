@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import api from '../../../api/client.js';
 import { parseApiError } from '../../../utils/apiError.js';
@@ -121,6 +121,78 @@ function QuizSection({ lessonId }) {
   );
 }
 
+// Assignment-kind lessons replace the generic Mark Complete toggle with
+// this — completion for an assignment only happens once staff grades it
+// (routes/lms.js's POST /submissions/:id/grade), since the mark is what the
+// learner is actually waiting on. Submitting doesn't complete the lesson.
+function AssignmentSubmission({ lessonId, onGraded }) {
+  const [latest, setLatest] = useState(undefined); // undefined = loading
+  const [bodyText, setBodyText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  function load() {
+    api.get(`/portal/lms/lessons/${lessonId}/submissions`)
+      .then((r) => setLatest(r.data?.[0] || null))
+      .catch(() => setLatest(null));
+  }
+  useEffect(() => { setLatest(undefined); setBodyText(''); load(); }, [lessonId]);
+
+  async function submit() {
+    if (!bodyText.trim()) return;
+    setSubmitting(true);
+    try {
+      await api.post(`/portal/lms/lessons/${lessonId}/submissions`, { bodyText: bodyText.trim() });
+      toast('Submitted — you’ll see your mark here once it’s reviewed.', 'success');
+      load();
+    } catch (e) {
+      toast(parseApiError(e), 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (latest === undefined) return <div className="text-muted small">Loading submission…</div>;
+
+  if (latest?.status === 'graded') {
+    return (
+      <div className="card mb-3">
+        <div className="card-body">
+          <div className="d-flex align-items-center gap-2 mb-2">
+            <iconify-icon icon="solar:diploma-verified-bold" class="text-success fs-4"></iconify-icon>
+            <h6 className="fw-bold mb-0">Marked — {latest.score}%</h6>
+          </div>
+          {latest.feedback && <p className="mb-0">{latest.feedback}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  if (latest?.status === 'pending') {
+    return (
+      <div className="alert alert-secondary mb-3">
+        <iconify-icon icon="solar:clock-circle-line-duotone" class="me-1"></iconify-icon>
+        Submitted — waiting to be marked.
+      </div>
+    );
+  }
+
+  return (
+    <div className="card mb-3">
+      <div className="card-body">
+        <h6 className="fw-bold mb-2">Submit your assignment</h6>
+        <textarea
+          className="form-control mb-2" rows={6} value={bodyText}
+          onChange={(e) => setBodyText(e.target.value)}
+          placeholder="Write your response here…"
+        />
+        <button className="btn btn-primary" onClick={submit} disabled={submitting || !bodyText.trim()}>
+          {submitting ? 'Submitting…' : 'Submit'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function PortalLessonView() {
   const { courseSlug, lessonSlug } = useParams();
   const navigate = useNavigate();
@@ -128,10 +200,35 @@ export default function PortalLessonView() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const lastReportedRef = useRef(0);
+  const currentTimeRef = useRef(0);
+  const lessonIdRef = useRef(null);
+
+  // Best-effort — never blocks playback or surfaces an error to the learner.
+  // Throttled to once per 10s of actual progress, plus a final report on
+  // pause/unmount so a short clip or an early pause isn't lost.
+  function postProgress(lessonId, seconds) {
+    const s = Math.floor(seconds);
+    api.post(`/portal/lms/lessons/${lessonId}/progress`, { secondsWatched: s, lastPositionSeconds: s }).catch(() => {});
+  }
+  function reportProgress(seconds) {
+    const s = Math.floor(seconds);
+    currentTimeRef.current = s;
+    if (s < lastReportedRef.current + 10 && s !== 0) return;
+    lastReportedRef.current = s;
+    postProgress(lesson.id, s);
+  }
+  useEffect(() => {
+    lessonIdRef.current = lesson?.id || null;
+  }, [lesson?.id]);
+  useEffect(() => () => {
+    if (lessonIdRef.current && currentTimeRef.current > 0) postProgress(lessonIdRef.current, currentTimeRef.current);
+  }, []);
 
   useEffect(() => {
     setLoading(true);
     setError('');
+    lastReportedRef.current = 0;
     api.get(`/portal/lms/courses/${courseSlug}/lessons/${lessonSlug}`)
       .then((r) => setLesson(r.data))
       .catch((e) => setError(parseApiError(e)))
@@ -164,13 +261,21 @@ export default function PortalLessonView() {
 
   return (
     <div>
-      <Link to={`/portal/learning/${courseSlug}`} className="btn btn-sm btn-light mb-3">← {lesson.courseTitle}</Link>
+      <Link to={`/portal/learning/${courseSlug}`} className="btn btn-sm btn-outline-dark mb-3">← {lesson.courseTitle}</Link>
 
       <div className="small text-muted mb-1">{lesson.moduleTitle}</div>
       <h3 className="fw-bolder mb-3">{lesson.title}</h3>
 
       {lesson.video?.url && (
-        <video controls preload="metadata" poster={lesson.video.poster} className="w-100 rounded mb-3" style={{ maxHeight: 480, background: '#000' }}>
+        <video
+          controls
+          preload="metadata"
+          poster={lesson.video.poster}
+          className="w-100 rounded mb-3"
+          style={{ maxHeight: 480, background: '#000' }}
+          onTimeUpdate={(e) => reportProgress(e.currentTarget.currentTime)}
+          onPause={(e) => reportProgress(e.currentTarget.currentTime)}
+        >
           <source src={lesson.video.url} />
         </video>
       )}
@@ -221,17 +326,26 @@ export default function PortalLessonView() {
         </div>
       )}
 
+      {lesson.kind === 'assignment' && <AssignmentSubmission lessonId={lesson.id} />}
+
       <div className="d-flex flex-wrap gap-2 align-items-center mb-3">
-        <button className={`btn ${isCompleted ? 'btn-outline-success' : 'btn-success'}`} onClick={toggleComplete} disabled={busy}>
-          <iconify-icon icon={isCompleted ? 'solar:check-circle-bold' : 'solar:check-circle-line-duotone'} class="me-1"></iconify-icon>
-          {isCompleted ? 'Completed' : 'Mark Complete'}
-        </button>
+        {lesson.kind !== 'assignment' && (
+          <button className={`btn ${isCompleted ? 'btn-outline-success' : 'btn-success'}`} onClick={toggleComplete} disabled={busy}>
+            <iconify-icon icon={isCompleted ? 'solar:check-circle-bold' : 'solar:check-circle-line-duotone'} class="me-1"></iconify-icon>
+            {isCompleted ? 'Completed' : 'Mark Complete'}
+          </button>
+        )}
+        {lesson.kind === 'assignment' && isCompleted && (
+          <span className="badge bg-success-subtle text-success">
+            <iconify-icon icon="solar:check-circle-bold" class="me-1"></iconify-icon>Completed
+          </span>
+        )}
         <div className="d-flex gap-2 ms-auto">
           {lesson.previousSlug && (
-            <button className="btn btn-light" onClick={() => navigate(`/portal/learning/${courseSlug}/${lesson.previousSlug}`)}>← Previous</button>
+            <button className="btn btn-outline-dark" onClick={() => navigate(`/portal/learning/${courseSlug}/${lesson.previousSlug}`)}>← Previous</button>
           )}
           {lesson.nextSlug && (
-            <button className="btn btn-light" onClick={() => navigate(`/portal/learning/${courseSlug}/${lesson.nextSlug}`)}>Next →</button>
+            <button className="btn btn-outline-dark" onClick={() => navigate(`/portal/learning/${courseSlug}/${lesson.nextSlug}`)}>Next →</button>
           )}
         </div>
       </div>

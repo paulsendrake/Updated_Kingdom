@@ -152,6 +152,87 @@ router.get('/courses/:id', requirePermission('lms.read'), async (req, res, next)
   } catch (err) { handleLmsError(err, res, next); }
 });
 
+/* ------------------------------------------------------------- pricing */
+//
+// Self-serve paid enrollment is a separate, app-owned table (lms_course_pricing
+// — see scripts/ensure-lms-pricing-table.js), not part of the vendored
+// module's own schema. The one thing that touches the vendor package here is
+// the auto-created "self-enrolled" cohort: the first time a course is marked
+// non-free, this route creates one dedicated cohort via the vendor's own
+// createCohort()/releaseCourse() — the exact same calls this file's own
+// POST /cohorts and POST /cohorts/:id/courses make for a staff-managed
+// cohort — and every self-serve signup (routes/lmsCheckout.js) just adds the
+// buyer to it. Reverting to 'free' never deletes that cohort or its members;
+// it only stops new checkouts (lmsCheckout.js refuses when access_type is
+// 'free'), so existing buyers keep access.
+
+router.get('/courses/:id/pricing', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const [[row]] = await db.query('SELECT * FROM lms_course_pricing WHERE course_id = :id', { id: req.params.id });
+    res.json(row || { access_type: 'free' });
+  } catch (err) { next(err); }
+});
+
+const pricingSchema = z.object({
+  accessType: z.enum(['free', 'one_time', 'recurring']),
+  price: z.number().positive().optional().nullable(),
+  intervalUnit: z.enum(['month', 'year']).optional(),
+  intervalCount: z.number().int().positive().optional(),
+  allowBuyerChoice: z.boolean().optional(),
+});
+router.put('/courses/:id/pricing', requirePermission('lms.write'), async (req, res, next) => {
+  try {
+    const input = pricingSchema.parse(req.body);
+    if (input.accessType !== 'free' && !(input.price > 0)) {
+      return res.status(400).json({ error: 'A price is required for a paid course.' });
+    }
+
+    const { store } = await loadRuntime();
+    const course = await store.findCourseById(req.params.id);
+    if (!course) return res.status(404).json({ error: 'No such course.' });
+
+    const [[existing]] = await db.query('SELECT * FROM lms_course_pricing WHERE course_id = :id', { id: req.params.id });
+
+    let cohortId = existing?.cohort_id || null;
+    if (input.accessType !== 'free' && !cohortId) {
+      const context = await contextFor(viewerIdFor(req.user), 'admin');
+      const { lms } = await loadRuntime();
+      const cohort = await lms.createCohort(context, { name: `${course.title} — Self-Enrolled` });
+      await lms.releaseCourse(context, { cohortId: cohort.id, courseId: req.params.id, availableFrom: new Date() });
+      cohortId = cohort.id;
+    }
+
+    const fields = {
+      course_id: req.params.id,
+      access_type: input.accessType,
+      price: input.accessType === 'free' ? null : input.price,
+      interval_unit: input.intervalUnit || 'month',
+      interval_count: input.intervalCount || 1,
+      allow_buyer_choice: input.allowBuyerChoice ? 1 : 0,
+      cohort_id: cohortId,
+    };
+    if (existing) {
+      await db.query(
+        `UPDATE lms_course_pricing
+            SET access_type = :access_type, price = :price, interval_unit = :interval_unit,
+                interval_count = :interval_count, allow_buyer_choice = :allow_buyer_choice, cohort_id = :cohort_id
+          WHERE course_id = :course_id`,
+        fields
+      );
+    } else {
+      const { randomUUID } = require('crypto');
+      await db.query(
+        `INSERT INTO lms_course_pricing (id, course_id, access_type, price, interval_unit, interval_count, allow_buyer_choice, cohort_id)
+         VALUES (:id, :course_id, :access_type, :price, :interval_unit, :interval_count, :allow_buyer_choice, :cohort_id)`,
+        { id: randomUUID(), ...fields }
+      );
+    }
+    await logActivity({ userId: req.user.id, entityType: 'lms_course', entityId: req.params.id, action: 'updated', description: `Set pricing to ${input.accessType}` });
+    const [[row]] = await db.query('SELECT * FROM lms_course_pricing WHERE course_id = :id', { id: req.params.id });
+    res.json(row);
+  } catch (err) { handleLmsError(err, res, next); }
+});
+
 /* ------------------------------------------------------------- modules */
 
 const moduleSchema = z.object({ courseId: z.string().min(1), title: z.string().min(2), summary: z.string().optional().nullable() });
@@ -485,6 +566,275 @@ router.delete('/cohorts/:id/courses/:courseId', requirePermission('lms.write'), 
     await logActivity({ userId: req.user.id, entityType: 'lms_cohort', entityId: req.params.id, action: 'updated', description: `Withdrew course ${req.params.courseId}` });
     res.json({ ok: true });
   } catch (err) { handleLmsError(err, res, next); }
+});
+
+/* ------------------------------------------------------------ gradebook */
+//
+// Read-only: the vendor package has no "reset a learner's quiz attempts"
+// function (attemptsFor() only reads), so this stays a progress/score view,
+// not a full CRUD surface on attempts — reaching past the vendor's service
+// layer to delete lms_quiz_attempts rows directly would break the
+// "never touch vendor internals" rule the rest of this build follows.
+router.get('/cohorts/:id/progress', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const { store, schema, db: lmsDb } = await loadRuntime();
+    const ids = await store.cohortMemberIds(req.params.id);
+    const numericIds = ids.map(Number).filter((n) => Number.isInteger(n));
+    const [members] = numericIds.length
+      ? await db.query('SELECT id, first_name, last_name, email FROM contacts WHERE id IN (:ids)', { ids: numericIds })
+      : [[]];
+
+    const releases = await lmsDb
+      .select({ courseId: schema.cohortCourses.courseId, title: schema.courses.title })
+      .from(schema.cohortCourses)
+      .innerJoin(schema.courses, eq(schema.courses.id, schema.cohortCourses.courseId))
+      .where(eq(schema.cohortCourses.cohortId, req.params.id));
+    const courseIds = releases.map((r) => r.courseId);
+
+    const context = await contextFor(viewerIdFor(req.user), 'admin');
+    const { lms } = await loadRuntime();
+    const progress = {};
+    for (const m of members) {
+      const stats = await lms.courseProgress(context, String(m.id), courseIds);
+      progress[m.id] = Object.fromEntries(stats);
+    }
+
+    // Graded assignment marks, keyed the same way as `progress` so the
+    // client can show them in the same cell — joined in from the app-owned
+    // lms_lesson_submissions table (the vendor engine has no marks concept).
+    const marks = {};
+    if (numericIds.length) {
+      const lessonIds = await lmsDb.select({ id: schema.lessons.id, moduleId: schema.lessons.moduleId }).from(schema.lessons);
+      const moduleIds = await lmsDb.select({ id: schema.modules.id, courseId: schema.modules.courseId }).from(schema.modules);
+      const courseByModule = new Map(moduleIds.map((m) => [m.id, m.courseId]));
+      const courseByLesson = new Map(lessonIds.map((l) => [l.id, courseByModule.get(l.moduleId)]));
+      const [submissionRows] = await db.query(
+        `SELECT lesson_id, contact_id, score FROM lms_lesson_submissions
+          WHERE status = 'graded' AND contact_id IN (:ids)`,
+        { ids: numericIds }
+      );
+      for (const s of submissionRows) {
+        const courseId = courseByLesson.get(s.lesson_id);
+        if (!courseId || !courseIds.includes(courseId)) continue;
+        marks[s.contact_id] = marks[s.contact_id] || {};
+        if (!marks[s.contact_id][courseId]) marks[s.contact_id][courseId] = [];
+        marks[s.contact_id][courseId].push(s.score);
+      }
+    }
+
+    res.json({ members, courses: releases, progress, marks });
+  } catch (err) { handleLmsError(err, res, next); }
+});
+
+/* ------------------------------------------------------------- marking */
+//
+// Assignment submission/grading — a data model the vendor engine has no
+// concept of at all (see scripts/ensure-lms-submissions-table.js's header
+// comment). Grading is the one write path here: it both records the mark
+// AND completes the lesson for that learner via the vendor's own
+// completeLesson(), called with a context acting as the learner (not the
+// grading staff member), since lms_lesson_progress is keyed to a real
+// contact id — see the Phase 2 plan's §3 for why.
+router.get('/submissions', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const status = req.query.status === 'graded' ? 'graded' : 'pending';
+    const [rows] = await db.query(
+      `SELECT s.*, CONCAT_WS(' ', c.first_name, c.last_name) AS contact_name, c.email AS contact_email
+         FROM lms_lesson_submissions s
+         LEFT JOIN contacts c ON c.id = s.contact_id
+        WHERE s.status = :status
+        ORDER BY s.submitted_at ASC`,
+      { status }
+    );
+    const { schema, db: lmsDb } = await loadRuntime();
+    const lessonIds = [...new Set(rows.map((r) => r.lesson_id))];
+    const lessons = lessonIds.length
+      ? await lmsDb.select({ id: schema.lessons.id, title: schema.lessons.title, moduleId: schema.lessons.moduleId }).from(schema.lessons)
+      : [];
+    const modules = await lmsDb.select({ id: schema.modules.id, courseId: schema.modules.courseId }).from(schema.modules);
+    const courses = await lmsDb.select({ id: schema.courses.id, title: schema.courses.title }).from(schema.courses);
+    const courseTitleByModule = new Map(modules.map((m) => [m.id, courses.find((c) => c.id === m.courseId)?.title]));
+    const lessonById = new Map(lessons.map((l) => [l.id, l]));
+
+    res.json(rows.map((r) => {
+      const lesson = lessonById.get(r.lesson_id);
+      return { ...r, lesson_title: lesson?.title || null, course_title: lesson ? courseTitleByModule.get(lesson.moduleId) : null };
+    }));
+  } catch (err) { next(err); }
+});
+
+router.get('/submissions/:id', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const [[row]] = await db.query(
+      `SELECT s.*, CONCAT_WS(' ', c.first_name, c.last_name) AS contact_name, c.email AS contact_email
+         FROM lms_lesson_submissions s
+         LEFT JOIN contacts c ON c.id = s.contact_id
+        WHERE s.id = :id`,
+      { id: req.params.id }
+    );
+    if (!row) return res.status(404).json({ error: 'No such submission.' });
+    res.json(row);
+  } catch (err) { next(err); }
+});
+
+const gradeSchema = z.object({ score: z.number().int().min(0).max(100), feedback: z.string().optional().nullable() });
+router.post('/submissions/:id/grade', requirePermission('lms.write'), async (req, res, next) => {
+  try {
+    const { score, feedback } = gradeSchema.parse(req.body);
+    const [[submission]] = await db.query('SELECT * FROM lms_lesson_submissions WHERE id = :id', { id: req.params.id });
+    if (!submission) return res.status(404).json({ error: 'No such submission.' });
+
+    await db.query(
+      `UPDATE lms_lesson_submissions
+          SET status = 'graded', score = :score, feedback = :feedback, graded_at = NOW(), graded_by_user_id = :uid
+        WHERE id = :id`,
+      { score, feedback: feedback || null, uid: req.user.id, id: req.params.id }
+    );
+
+    const { lms, store } = await loadRuntime();
+    const learnerContext = await contextFor(String(submission.contact_id), 'learner');
+    const result = await lms.completeLesson(learnerContext, submission.lesson_id);
+
+    // A graded assignment can be the thing that pushes a course to 100% —
+    // check and auto-issue a certificate the same way lmsPortal.js's own
+    // lesson-complete route does. LessonInContext (store.findLessonById's
+    // return shape) carries courseId directly — see vendor/kcc-lms/src/store.ts.
+    if (result?.courseCompleted) {
+      const found = await store.findLessonById(submission.lesson_id);
+      if (found?.courseId) {
+        const { issueCertificateIfComplete } = require('../services/lmsCertificates');
+        await issueCertificateIfComplete({ courseId: found.courseId, contactId: submission.contact_id });
+      }
+    }
+
+    await logActivity({
+      userId: req.user.id, entityType: 'lms_submission', entityId: submission.id,
+      action: 'graded', description: `Graded submission — score ${score}` });
+    res.json({ ok: true });
+  } catch (err) { handleLmsError(err, res, next); }
+});
+
+/* ------------------------------------------------------- curriculum drafts */
+//
+// "Draft with AI" — see services/ai.js's draftCurriculum(). The draft is
+// staging only; accepting it calls the vendor's own createCourse/
+// createModule/createLesson in sequence, exactly as a human typing it in by
+// hand would, never a shortcut around those functions.
+const curriculumPromptSchema = z.object({
+  topic: z.string().min(2),
+  audience: z.string().optional().nullable(),
+  goals: z.string().optional().nullable(),
+});
+router.post('/curriculum-drafts', requirePermission('lms.write'), async (req, res, next) => {
+  try {
+    const input = curriculumPromptSchema.parse(req.body);
+    const { draftCurriculum } = require('../services/ai');
+    const draft = await draftCurriculum(input);
+    const [ins] = await db.query(
+      `INSERT INTO lms_curriculum_drafts (prompt_input, draft_json, created_by_user_id)
+       VALUES (CAST(:input AS JSON), CAST(:draft AS JSON), :uid)`,
+      { input: JSON.stringify(input), draft: JSON.stringify(draft), uid: req.user.id }
+    );
+    res.status(201).json({ id: ins.insertId, draft });
+  } catch (err) { next(err); }
+});
+
+router.get('/curriculum-drafts/:id', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const [[row]] = await db.query('SELECT * FROM lms_curriculum_drafts WHERE id = :id', { id: req.params.id });
+    if (!row) return res.status(404).json({ error: 'No such draft.' });
+    res.json(row);
+  } catch (err) { next(err); }
+});
+
+router.put('/curriculum-drafts/:id', requirePermission('lms.write'), async (req, res, next) => {
+  try {
+    await db.query(
+      'UPDATE lms_curriculum_drafts SET draft_json = CAST(:draft AS JSON) WHERE id = :id AND status = \'draft\'',
+      { draft: JSON.stringify(req.body?.draft || {}), id: req.params.id }
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+router.post('/curriculum-drafts/:id/accept', requirePermission('lms.write'), async (req, res, next) => {
+  try {
+    const [[row]] = await db.query('SELECT * FROM lms_curriculum_drafts WHERE id = :id', { id: req.params.id });
+    if (!row) return res.status(404).json({ error: 'No such draft.' });
+    if (row.status !== 'draft') return res.status(409).json({ error: 'This draft was already accepted or discarded.' });
+    const draft = row.draft_json;
+
+    const context = await contextFor(viewerIdFor(req.user), 'admin');
+    const { lms } = await loadRuntime();
+    const created = await lms.createCourse(context, {
+      title: draft.title, subtitle: draft.subtitle || null, summary: draft.summary || null,
+    });
+    for (const mod of (draft.modules || [])) {
+      const createdModule = await lms.createModule(context, { courseId: created.id, title: mod.title, summary: mod.summary || null });
+      for (const lesson of (mod.lessons || [])) {
+        await lms.createLesson(context, {
+          moduleId: createdModule.id, title: lesson.title, summary: lesson.summary || null,
+          kind: ['video', 'reading', 'assignment'].includes(lesson.kind) ? lesson.kind : 'reading',
+          estimatedMinutes: lesson.estimatedMinutes || null,
+          keyPoints: Array.isArray(lesson.keyPoints) ? lesson.keyPoints : [],
+        });
+      }
+    }
+
+    await db.query(
+      `UPDATE lms_curriculum_drafts SET status = 'accepted', created_course_id = :cid WHERE id = :id`,
+      { cid: created.id, id: req.params.id }
+    );
+    await logActivity({ userId: req.user.id, entityType: 'lms_course', entityId: created.id, action: 'created', description: `Created from AI curriculum draft #${req.params.id}` });
+    res.json({ ok: true, courseId: created.id });
+  } catch (err) { handleLmsError(err, res, next); }
+});
+
+/* ---------------------------------------------------------- enrollments */
+//
+// One row per LMS-linked invoice (both one-time and recurring purchases
+// carry invoices.lms_course_pricing_id — see scripts/ensure-lms-invoice-column.js
+// for why one-time needs it too). Raw joins across the app's own tables plus
+// a second query against the vendor's course schema, merged in JS — same
+// split this file's own GET /courses uses, and the same reasoning as
+// routes/lmsCheckout.js's catalog route: lms_course_pricing lives in the
+// app's `db` pool, course titles live in the vendor's dedicated pool.
+router.get('/enrollments', requirePermission('lms.read'), async (req, res, next) => {
+  try {
+    const [rows] = await db.query(`
+      SELECT i.id AS invoice_id, i.invoice_number, i.total, i.status AS invoice_status, i.issue_date,
+             i.lms_course_pricing_id, i.contact_id,
+             CONCAT_WS(' ', c.first_name, c.last_name) AS contact_name, c.email AS contact_email,
+             p.id AS payment_id, p.status AS payment_status, p.method
+        FROM invoices i
+        LEFT JOIN contacts c ON c.id = i.contact_id
+        LEFT JOIN payments p ON p.invoice_id = i.id
+       WHERE i.lms_course_pricing_id IS NOT NULL
+       ORDER BY i.id DESC
+    `);
+    const pricingIds = [...new Set(rows.map((r) => r.lms_course_pricing_id))];
+    const [pricingRows] = pricingIds.length
+      ? await db.query('SELECT id, course_id, access_type, cohort_id FROM lms_course_pricing WHERE id IN (:ids)', { ids: pricingIds })
+      : [[]];
+    const pricingById = new Map(pricingRows.map((p) => [p.id, p]));
+
+    const { schema, db: lmsDb } = await loadRuntime();
+    const courseIds = [...new Set(pricingRows.map((p) => p.course_id))];
+    const courses = courseIds.length
+      ? await lmsDb.select({ id: schema.courses.id, title: schema.courses.title }).from(schema.courses)
+      : [];
+    const titleByCourseId = new Map(courses.map((c) => [c.id, c.title]));
+
+    res.json(rows.map((r) => {
+      const pricing = pricingById.get(r.lms_course_pricing_id);
+      return {
+        ...r,
+        course_title: pricing ? titleByCourseId.get(pricing.course_id) : null,
+        access_type: pricing?.access_type || null,
+        cohort_id: pricing?.cohort_id || null,
+      };
+    }));
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

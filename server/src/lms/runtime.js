@@ -45,6 +45,37 @@ const videoPort = {
   },
 };
 
+// Notifier — the vendor module emits 5 LmsEvent kinds (course.released,
+// lesson.completed, course.completed, quiz.passed, quiz.failed) from its own
+// services already; without this port they were silent no-ops. Routes them
+// into the same automation-engine trigger every other module's lifecycle
+// event uses (services/constituents.js's notifyLmsEvent) — best-effort,
+// swallows its own errors, so a notification failure never breaks the
+// learner action (completing a lesson, submitting a quiz) that triggered it.
+// event shape per vendor/kcc-lms/src/ports.ts's LmsEvent union — discriminant
+// is `kind`, userId is always a contacts.id string (never a 'staff:' marker;
+// only learner-facing actions emit these).
+const notifierPort = {
+  async notify(event) {
+    try {
+      const { notifyLmsEvent } = require('../services/constituents');
+      const contactId = Number(event?.userId);
+      if (!Number.isInteger(contactId)) return;
+      const payload = {
+        'course.released':  { courseName: event.courseTitle },
+        'lesson.completed': { lessonName: event.lessonTitle },
+        'course.completed': { courseName: event.courseTitle },
+        'quiz.passed':      { score: event.score },
+        'quiz.failed':      { score: event.score },
+      }[event.kind] || {};
+      await notifyLmsEvent(event.kind, contactId, payload);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[lms/runtime] notifier failed:', e.message);
+    }
+  },
+};
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT) || 3306,
@@ -88,7 +119,7 @@ async function loadRuntime() {
  */
 async function contextFor(viewerId, role) {
   const { lms, store } = await loadRuntime();
-  return lms.lmsContext({ store, viewer: lms.asViewer(viewerId, role), ports: { storage: storagePort, video: videoPort } });
+  return lms.lmsContext({ store, viewer: lms.asViewer(viewerId, role), ports: { storage: storagePort, video: videoPort, notifier: notifierPort } });
 }
 
 /** Maps the module's typed errors onto HTTP status codes. */

@@ -28,6 +28,7 @@ import DonationBlock from './DonationBlock.jsx';
 import MembershipBlock from './MembershipBlock.jsx';
 import GiveWidgetBlock from './GiveWidgetBlock.jsx';
 import EventListBlock from './EventListBlock.jsx';
+import CourseCatalogBlock from './CourseCatalogBlock.jsx';
 import { ContactDetails, MapBlock } from './ContactSection.jsx';
 
 export const NODES = {
@@ -57,6 +58,7 @@ export const NODES = {
   MembershipBlock,
   GiveWidgetBlock,
   EventListBlock,
+  CourseCatalogBlock,
   ContactDetails,
   MapBlock,
 };
@@ -88,6 +90,7 @@ export {
   MembershipBlock,
   GiveWidgetBlock,
   EventListBlock,
+  CourseCatalogBlock,
   ContactDetails,
   MapBlock,
 };
@@ -162,6 +165,7 @@ export const TOOLBOX = [
       { key: 'MembershipBlock', label: 'Membership', icon: 'fa-solid fa-id-card', element: <Element is={MembershipBlock} /> },
       { key: 'GiveWidgetBlock', label: 'Give Widget', icon: 'fa-solid fa-hand-holding-heart', element: <Element is={GiveWidgetBlock} /> },
       { key: 'EventListBlock', label: 'Event Listing', icon: 'fa-solid fa-calendar-days', element: <Element is={EventListBlock} /> },
+      { key: 'CourseCatalogBlock', label: 'Course Catalog', icon: 'fa-solid fa-graduation-cap', element: <Element is={CourseCatalogBlock} /> },
       { key: 'ContactDetails', label: 'Contact Details', icon: 'fa-solid fa-address-card', element: <Element is={ContactDetails} /> },
       { key: 'MapBlock', label: 'Map', icon: 'fa-solid fa-map-location-dot', element: <Element is={MapBlock} /> },
     ],

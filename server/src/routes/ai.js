@@ -8,7 +8,7 @@ const { z }  = require('zod');
 const { rateLimit } = require('express-rate-limit');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
-const { streamChat, loadKnowledge, getSettings } = require('../services/ai');
+const { streamChat, loadKnowledge, getSettings, generateField } = require('../services/ai');
 
 router.use(requireAuth);
 
@@ -61,6 +61,30 @@ router.post('/chat', requireStaffAccess, aiChatLimiter, async (req, res, next) =
     res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     res.end();
   }
+});
+
+// Same per-user cap as the chat limiter, same financial-DoS reasoning — a
+// one-shot call is cheaper per request but still a real Anthropic API spend.
+const aiFieldLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `ai-field:${req.user.id}`,
+  message: { error: 'Too many requests to the assistant. Please wait a few minutes and try again.' },
+});
+
+// ── POST /api/ai/generate-field ──────────────────────────────────────────────
+// Body: { fieldLabel, context?, existingText? } → { text }
+// A single non-streaming call for the "Draft this for me" button next to one
+// field — no chat history, no tool loop. See services/ai.js's generateField().
+router.post('/generate-field', requireStaffAccess, aiFieldLimiter, async (req, res, next) => {
+  try {
+    const { fieldLabel, context, existingText } = req.body || {};
+    if (!fieldLabel) return res.status(400).json({ error: 'fieldLabel is required' });
+    const text = await generateField({ fieldLabel, context, existingText });
+    res.json({ text });
+  } catch (err) { next(err); }
 });
 
 // ── GET /api/ai/kb ────────────────────────────────────────────────────────────

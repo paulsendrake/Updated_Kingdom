@@ -12,6 +12,63 @@ function blankCohort() {
   return { name: '', description: '', startsOn: '', endsOn: '' };
 }
 
+// Read-only progress table — the vendor package has no function to reset a
+// learner's quiz attempts (attemptsFor() only reads them), so this is a
+// scores/completion view, not a full grading surface.
+function Gradebook({ cohortId }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get(`/lms/cohorts/${cohortId}/progress`)
+      .then(({ data: d }) => { if (!cancelled) setData(d); })
+      .catch((e) => { if (!cancelled) toast(parseApiError(e), 'error'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [cohortId]);
+
+  if (loading) return <div className="text-muted small">Loading gradebook…</div>;
+  if (!data || data.courses.length === 0) return <div className="text-muted small">Release a course to this cohort to see progress here.</div>;
+
+  return (
+    <div className="table-responsive">
+      <table className="table table-sm table-hover align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Member</th>
+            {data.courses.map((c) => <th key={c.courseId}>{c.title}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {data.members.map((m) => (
+            <tr key={m.id}>
+              <td className="small">{m.first_name} {m.last_name}</td>
+              {data.courses.map((c) => {
+                const stat = data.progress[m.id]?.[c.courseId];
+                const percent = stat?.percent ?? 0;
+                return (
+                  <td key={c.courseId} style={{ minWidth: 140 }}>
+                    <div className="d-flex align-items-center gap-2">
+                      <div className="progress flex-grow-1" style={{ height: 6 }}>
+                        <div className={`progress-bar ${percent === 100 ? 'bg-success' : ''}`} style={{ width: `${percent}%` }} />
+                      </div>
+                      <span className="small text-muted">{percent}%</span>
+                    </div>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+          {data.members.length === 0 && (
+            <tr><td colSpan={data.courses.length + 1} className="text-muted small">No members yet.</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function fmtDate(d) {
   if (!d) return '—';
   return new Date(d).toLocaleDateString();
@@ -30,6 +87,7 @@ function CohortManagePanel({ cohort, courses, onChanged }) {
   const [contactResults, setContactResults] = useState([]);
   const [courseToRelease, setCourseToRelease] = useState('');
   const [availableFrom, setAvailableFrom] = useState('');
+  const [showGradebook, setShowGradebook] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -140,7 +198,7 @@ function CohortManagePanel({ cohort, courses, onChanged }) {
                 {members.map((m) => (
                   <li key={m.id} className="list-group-item d-flex align-items-center justify-content-between py-1 px-2">
                     <span className="small">{m.first_name} {m.last_name} <span className="text-muted">{m.email || ''}</span></span>
-                    <button className="btn btn-sm btn-light text-danger" onClick={() => removeMember(m)} aria-label={`Remove ${m.first_name}`}>
+                    <button className="btn btn-sm btn-outline-danger" onClick={() => removeMember(m)} aria-label={`Remove ${m.first_name}`}>
                       <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                     </button>
                   </li>
@@ -173,13 +231,25 @@ function CohortManagePanel({ cohort, courses, onChanged }) {
                       {r.title}
                       {r.availableFrom && <span className="text-muted"> · opens {fmtDate(r.availableFrom)}</span>}
                     </span>
-                    <button className="btn btn-sm btn-light text-danger" onClick={() => withdrawCourse(r.courseId)} aria-label={`Withdraw ${r.title}`}>
+                    <button className="btn btn-sm btn-outline-danger" onClick={() => withdrawCourse(r.courseId)} aria-label={`Withdraw ${r.title}`}>
                       <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                     </button>
                   </li>
                 ))}
                 {releases.length === 0 && <li className="list-group-item small text-muted py-2">No courses released yet.</li>}
               </ul>
+            </div>
+
+            <div className="col-12">
+              <button className="btn btn-sm btn-outline-dark" onClick={() => setShowGradebook((s) => !s)}>
+                <iconify-icon icon="solar:chart-2-line-duotone" class="me-1"></iconify-icon>
+                {showGradebook ? 'Hide Gradebook' : 'Show Gradebook'}
+              </button>
+              {showGradebook && (
+                <div className="mt-2">
+                  <Gradebook cohortId={cohort.id} />
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -272,7 +342,7 @@ export default function LmsCohortsPage() {
                       <td className="small text-muted">{fmtDate(c.startsOn)} – {fmtDate(c.endsOn)}</td>
                       <td className="text-end">
                         <button
-                          className="btn btn-sm btn-light"
+                          className="btn btn-sm btn-outline-dark"
                           onClick={() => setExpanded(expanded === c.id ? null : c.id)}
                         >
                           <iconify-icon icon={expanded === c.id ? 'solar:alt-arrow-up-line-duotone' : 'solar:alt-arrow-down-line-duotone'}></iconify-icon>
@@ -300,7 +370,7 @@ export default function LmsCohortsPage() {
         title="New Cohort"
         size="md"
         footer={<>
-          <button className="btn btn-light" onClick={() => setShow(false)}>Cancel</button>
+          <button className="btn btn-outline-dark" onClick={() => setShow(false)}>Cancel</button>
           <button className="btn btn-primary" onClick={save}>Save</button>
         </>}
       >

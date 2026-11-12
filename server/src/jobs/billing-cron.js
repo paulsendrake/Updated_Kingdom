@@ -13,6 +13,28 @@ const { wontRenewSql } = require('../services/membershipTerms');
 function roundMoney(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 
+// A membership subscription ending doesn't need to revoke anything — being
+// "a member" was never cohort-gated. A paid-course subscription's whole
+// point IS the cohort seat, so closing it out (end-date reached, or a staff
+// cancel) has to also call the vendored LMS engine's removeMember() —
+// otherwise the buyer keeps portal access to a course they're no longer
+// paying for. Best-effort: never let this block the subscription's own
+// status change, same contract as services/constituents.js's notify* helpers.
+async function revokeLmsAccessIfNeeded(sub) {
+  if (!sub?.lms_course_pricing_id || !sub.contact_id) return;
+  try {
+    const [[pricing]] = await db.query('SELECT cohort_id FROM lms_course_pricing WHERE id = :id', { id: sub.lms_course_pricing_id });
+    if (!pricing?.cohort_id) return;
+    const { contextFor, loadRuntime } = require('../lms/runtime');
+    const context = await contextFor('system', 'admin');
+    const { lms } = await loadRuntime();
+    await lms.removeMember(context, pricing.cohort_id, String(sub.contact_id));
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[billing-cron] failed to revoke LMS access for subscription #${sub.id}:`, e.message);
+  }
+}
+
 function addInterval(dateStr, unit, count) {
   const d = new Date(dateStr);
   const n = Number(count || 1);
@@ -55,6 +77,7 @@ async function runSubscription(subId) {
     await logActivity({
       entityType: 'subscription', entityId: sub.id,
       action: 'completed', description: `Ended ${sub.end_date} — no further billing` });
+    await revokeLmsAccessIfNeeded(sub);
     return { ok: false, skipped: true, status: 'completed' };
   }
 
@@ -110,6 +133,7 @@ async function runSubscription(subId) {
             status = CASE WHEN :end = 1 THEN 'completed' ELSE status END
       WHERE id = :id`,
     { next: new_next, end: shouldEnd ? 1 : 0, id: sub.id });
+  if (shouldEnd) await revokeLmsAccessIfNeeded(sub);
 
   await logActivity({
     entityType: 'subscription', entityId: sub.id,
@@ -824,3 +848,4 @@ module.exports.checkMembershipRenewals = checkMembershipRenewals;
 module.exports.checkPledgeInstallmentsUpcoming = checkPledgeInstallmentsUpcoming;
 module.exports.checkComplianceExpiring = checkComplianceExpiring;
 module.exports.addInterval = addInterval;
+module.exports.revokeLmsAccessIfNeeded = revokeLmsAccessIfNeeded;

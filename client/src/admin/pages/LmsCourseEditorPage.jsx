@@ -4,6 +4,7 @@ import api from '../../api/client.js';
 import PageHeader from '../../components/PageHeader.jsx';
 import Modal from '../../components/Modal.jsx';
 import FormErrorBanner from '../../components/FormErrorBanner.jsx';
+import AiDraftButton from '../../components/AiDraftButton.jsx';
 import { toast } from '../../components/Toast.jsx';
 import { parseApiError } from '../../utils/apiError.js';
 import { useConfirm } from '../../hooks/useConfirm.jsx';
@@ -36,12 +37,20 @@ function blankQuiz(lessonId) {
   };
 }
 
+function blankPricing() {
+  return { access_type: 'free', price: '', interval_unit: 'month', interval_count: 1, allow_buyer_choice: false };
+}
+
 export default function LmsCourseEditorPage() {
   const { id } = useParams();
   const { can } = useAuth();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [course, setCourse] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  const [pricing, setPricing] = useState(blankPricing());
+  const [pricingSaving, setPricingSaving] = useState(false);
+  const [pricingError, setPricingError] = useState('');
 
   const [moduleShow, setModuleShow] = useState(false);
   const [moduleForm, setModuleForm] = useState(blankModule());
@@ -63,8 +72,18 @@ export default function LmsCourseEditorPage() {
   async function load() {
     setLoading(true);
     try {
-      const { data } = await api.get(`/lms/courses/${id}`);
+      const [{ data }, { data: pricingData }] = await Promise.all([
+        api.get(`/lms/courses/${id}`),
+        api.get(`/lms/courses/${id}/pricing`),
+      ]);
       setCourse(data);
+      setPricing({
+        access_type: pricingData.access_type,
+        price: pricingData.price ?? '',
+        interval_unit: pricingData.interval_unit || 'month',
+        interval_count: pricingData.interval_count || 1,
+        allow_buyer_choice: !!pricingData.allow_buyer_choice,
+      });
     } catch (e) {
       toast(parseApiError(e), 'error');
     } finally {
@@ -72,6 +91,32 @@ export default function LmsCourseEditorPage() {
     }
   }
   useEffect(() => { load(); }, [id]);
+
+  /* ------------------------------------------------------------ pricing */
+
+  async function savePricing() {
+    setPricingError('');
+    if (pricing.access_type !== 'free' && !(Number(pricing.price) > 0)) {
+      setPricingError('Enter a price greater than $0.');
+      return;
+    }
+    setPricingSaving(true);
+    try {
+      await api.put(`/lms/courses/${id}/pricing`, {
+        accessType: pricing.access_type,
+        price: pricing.access_type === 'free' ? null : Number(pricing.price),
+        intervalUnit: pricing.interval_unit,
+        intervalCount: Number(pricing.interval_count) || 1,
+        allowBuyerChoice: pricing.allow_buyer_choice,
+      });
+      toast('Pricing saved.', 'success');
+      load();
+    } catch (e) {
+      setPricingError(parseApiError(e));
+    } finally {
+      setPricingSaving(false);
+    }
+  }
 
   /* ------------------------------------------------------------ modules */
 
@@ -258,7 +303,7 @@ export default function LmsCourseEditorPage() {
         title={course.title}
         subtitle={`${course.lessonCount} published lesson${course.lessonCount === 1 ? '' : 's'} · ${course.percent}% an example learner would see complete`}
         actions={<>
-          <Link to="/admin/lms/courses" className="btn btn-light">← Courses</Link>
+          <Link to="/admin/lms/courses" className="btn btn-outline-dark">← Courses</Link>
           {canWrite && (
             <button className="btn btn-primary ms-2" onClick={openNewModule}>
               <iconify-icon icon="solar:add-circle-line-duotone" class="me-1"></iconify-icon> Add Module
@@ -266,6 +311,91 @@ export default function LmsCourseEditorPage() {
           )}
         </>}
       />
+
+      <div className="card mb-3">
+        <div className="card-header fw-semibold">
+          <iconify-icon icon="solar:wallet-money-line-duotone" class="me-2"></iconify-icon>
+          Pricing &amp; Enrollment
+        </div>
+        <div className="card-body">
+          <FormErrorBanner error={pricingError} />
+          <div className="row g-2 align-items-end">
+            <div className="col-md-4">
+              <label className="form-label">Access</label>
+              <select
+                className="form-select"
+                value={pricing.access_type}
+                disabled={!canWrite}
+                onChange={(e) => setPricing({ ...pricing, access_type: e.target.value })}
+              >
+                <option value="free">Free (staff enrolls manually)</option>
+                <option value="one_time">One-time purchase</option>
+                <option value="recurring">Recurring</option>
+              </select>
+            </div>
+            {pricing.access_type !== 'free' && (
+              <div className="col-md-3">
+                <label className="form-label">Price</label>
+                <div className="input-group">
+                  <span className="input-group-text">$</span>
+                  <input
+                    type="number" min="0.01" step="0.01" className="form-control"
+                    value={pricing.price} disabled={!canWrite}
+                    onChange={(e) => setPricing({ ...pricing, price: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
+            {pricing.access_type === 'recurring' && (
+              <>
+                <div className="col-md-2">
+                  <label className="form-label">Every</label>
+                  <input
+                    type="number" min="1" className="form-control"
+                    value={pricing.interval_count} disabled={!canWrite}
+                    onChange={(e) => setPricing({ ...pricing, interval_count: e.target.value })}
+                  />
+                </div>
+                <div className="col-md-3">
+                  <label className="form-label">Interval</label>
+                  <select
+                    className="form-select" value={pricing.interval_unit} disabled={!canWrite}
+                    onChange={(e) => setPricing({ ...pricing, interval_unit: e.target.value })}
+                  >
+                    <option value="month">Month(s)</option>
+                    <option value="year">Year(s)</option>
+                  </select>
+                </div>
+                <div className="col-12">
+                  <div className="form-check form-switch">
+                    <input
+                      className="form-check-input" type="checkbox" id="pricing_buyer_choice"
+                      checked={pricing.allow_buyer_choice} disabled={!canWrite}
+                      onChange={(e) => setPricing({ ...pricing, allow_buyer_choice: e.target.checked })}
+                    />
+                    <label className="form-check-label" htmlFor="pricing_buyer_choice">
+                      Let the buyer choose one-time or recurring at checkout
+                    </label>
+                  </div>
+                </div>
+              </>
+            )}
+            {canWrite && (
+              <div className="col-12">
+                <button className="btn btn-primary" onClick={savePricing} disabled={pricingSaving}>
+                  {pricingSaving ? 'Saving…' : 'Save Pricing'}
+                </button>
+              </div>
+            )}
+          </div>
+          {pricing.access_type !== 'free' && (
+            <div className="form-text mt-2">
+              A buyer can enroll and pay for this course themselves from its public page, without a staff member adding them to a cohort.
+              Switching back to Free only stops new signups from being charged — anyone who already paid keeps access.
+            </div>
+          )}
+        </div>
+      </div>
 
       {course.modules.length === 0 && (
         <div className="empty-state">No modules yet — add one to start building the course outline.</div>
@@ -280,10 +410,10 @@ export default function LmsCourseEditorPage() {
             </div>
             {canWrite && (
               <div className="d-flex gap-1">
-                <button className="btn btn-sm btn-light" onClick={() => openEditModule(m)} title="Edit module">
+                <button className="btn btn-sm btn-outline-dark" onClick={() => openEditModule(m)} title="Edit module">
                   <iconify-icon icon="solar:pen-line-duotone"></iconify-icon>
                 </button>
-                <button className="btn btn-sm btn-light text-danger" onClick={() => deleteModule(m)} title="Delete module">
+                <button className="btn btn-sm btn-outline-danger" onClick={() => deleteModule(m)} title="Delete module">
                   <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                 </button>
               </div>
@@ -307,16 +437,16 @@ export default function LmsCourseEditorPage() {
                 </div>
                 {canWrite && (
                   <div className="d-flex gap-1 flex-shrink-0">
-                    <button className="btn btn-sm btn-light" onClick={() => setMediaLesson(l)} title="Video & Attachments">
+                    <button className="btn btn-sm btn-outline-dark" onClick={() => setMediaLesson(l)} title="Video & Attachments">
                       <iconify-icon icon="solar:videocamera-add-line-duotone"></iconify-icon>
                     </button>
-                    <button className="btn btn-sm btn-light" onClick={() => openQuiz(l)} title="Quiz">
+                    <button className="btn btn-sm btn-outline-dark" onClick={() => openQuiz(l)} title="Quiz">
                       <iconify-icon icon="solar:clipboard-check-line-duotone"></iconify-icon>
                     </button>
-                    <button className="btn btn-sm btn-light" onClick={() => openEditLesson(l)} title="Edit lesson">
+                    <button className="btn btn-sm btn-outline-dark" onClick={() => openEditLesson(l)} title="Edit lesson">
                       <iconify-icon icon="solar:pen-line-duotone"></iconify-icon>
                     </button>
-                    <button className="btn btn-sm btn-light text-danger" onClick={() => deleteLesson(l)} title="Delete lesson">
+                    <button className="btn btn-sm btn-outline-danger" onClick={() => deleteLesson(l)} title="Delete lesson">
                       <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                     </button>
                   </div>
@@ -325,7 +455,7 @@ export default function LmsCourseEditorPage() {
             ))}
             {canWrite && (
               <li className="list-group-item">
-                <button className="btn btn-sm btn-light" onClick={() => openNewLesson(m.id)}>
+                <button className="btn btn-sm btn-outline-dark" onClick={() => openNewLesson(m.id)}>
                   <iconify-icon icon="solar:add-circle-line-duotone" class="me-1"></iconify-icon> Add Lesson
                 </button>
               </li>
@@ -341,7 +471,7 @@ export default function LmsCourseEditorPage() {
       <Modal
         show={moduleShow} onClose={() => setModuleShow(false)}
         title={moduleForm.id ? 'Edit Module' : 'New Module'} size="md"
-        footer={<><button className="btn btn-light" onClick={() => setModuleShow(false)}>Cancel</button>
+        footer={<><button className="btn btn-outline-dark" onClick={() => setModuleShow(false)}>Cancel</button>
                   <button className="btn btn-primary" onClick={saveModule}>Save</button></>}
       >
         <FormErrorBanner error={moduleError} />
@@ -362,7 +492,7 @@ export default function LmsCourseEditorPage() {
         <Modal
           show={lessonShow} onClose={() => setLessonShow(false)}
           title={lessonForm.id ? 'Edit Lesson' : 'New Lesson'} size="lg"
-          footer={<><button className="btn btn-light" onClick={() => setLessonShow(false)}>Cancel</button>
+          footer={<><button className="btn btn-outline-dark" onClick={() => setLessonShow(false)}>Cancel</button>
                     <button className="btn btn-primary" onClick={saveLesson}>Save</button></>}
         >
           <FormErrorBanner error={lessonError} />
@@ -402,6 +532,14 @@ export default function LmsCourseEditorPage() {
             <div className="col-12">
               <label className="form-label">Body</label>
               <textarea className="form-control" rows="6" value={lessonForm.body} onChange={(e) => setLessonForm({ ...lessonForm, body: e.target.value })} />
+              <div className="mt-1">
+                <AiDraftButton
+                  fieldLabel="lesson content"
+                  context={`A ${lessonForm.kind} lesson titled "${lessonForm.title || 'Untitled'}"${lessonForm.summary ? `. Summary: ${lessonForm.summary}` : ''}${lessonForm.kind === 'assignment' ? '. Write it as instructions for an assignment the learner will submit.' : ''}`}
+                  existingText={lessonForm.body}
+                  onGenerated={(text) => setLessonForm((f) => ({ ...f, body: text }))}
+                />
+              </div>
             </div>
             <div className="col-md-6">
               <label className="form-label">Key Points <span className="text-muted small">(one per line)</span></label>
@@ -433,7 +571,7 @@ export default function LmsCourseEditorPage() {
             {quizForm.id && (
               <button className="btn btn-outline-danger me-auto" onClick={deleteCurrentQuiz}>Delete Quiz</button>
             )}
-            <button className="btn btn-light" onClick={() => setQuizShow(false)}>Cancel</button>
+            <button className="btn btn-outline-dark" onClick={() => setQuizShow(false)}>Cancel</button>
             <button className="btn btn-primary" onClick={saveQuiz} disabled={quizLoading}>Save Quiz</button>
           </>}
         >
@@ -465,7 +603,7 @@ export default function LmsCourseEditorPage() {
                     <div className="d-flex justify-content-between align-items-start gap-2 mb-2">
                       <label className="form-label mb-0 flex-grow-1">Question {qi + 1}</label>
                       {quizForm.questions.length > 1 && (
-                        <button className="btn btn-sm btn-light text-danger" onClick={() => removeQuestion(qi)}>
+                        <button className="btn btn-sm btn-outline-danger" onClick={() => removeQuestion(qi)}>
                           <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                         </button>
                       )}
@@ -478,19 +616,19 @@ export default function LmsCourseEditorPage() {
                         <input type="radio" name={`correct-${qi}`} checked={o.isCorrect} onChange={() => setCorrectOption(qi, oi)} />
                         <input className="form-control form-control-sm" value={o.label} onChange={(e) => updateOption(qi, oi, { label: e.target.value })} />
                         {q.options.length > 2 && (
-                          <button className="btn btn-sm btn-light text-danger" onClick={() => removeOption(qi, oi)}>
+                          <button className="btn btn-sm btn-outline-danger" onClick={() => removeOption(qi, oi)}>
                             <iconify-icon icon="solar:close-circle-line-duotone"></iconify-icon>
                           </button>
                         )}
                       </div>
                     ))}
-                    <button className="btn btn-sm btn-light mt-1" onClick={() => addOption(qi)}>
+                    <button className="btn btn-sm btn-outline-dark mt-1" onClick={() => addOption(qi)}>
                       <iconify-icon icon="solar:add-circle-line-duotone" class="me-1"></iconify-icon> Add option
                     </button>
                   </div>
                 </div>
               ))}
-              <button className="btn btn-light" onClick={addQuestion}>
+              <button className="btn btn-outline-dark" onClick={addQuestion}>
                 <iconify-icon icon="solar:add-circle-line-duotone" class="me-1"></iconify-icon> Add Question
               </button>
             </div>
@@ -602,7 +740,7 @@ function LessonMediaModal({ lesson, onClose, onChanged }) {
   }
 
   return (
-    <Modal show onClose={onClose} title={`Media — ${lesson.title}`} size="lg" footer={<button className="btn btn-light" onClick={onClose}>Close</button>}>
+    <Modal show onClose={onClose} title={`Media — ${lesson.title}`} size="lg" footer={<button className="btn btn-outline-dark" onClick={onClose}>Close</button>}>
       {confirmDialog}
       {loading ? <div className="text-muted small">Loading…</div> : (
         <div>
@@ -633,7 +771,7 @@ function LessonMediaModal({ lesson, onClose, onChanged }) {
             {attachments.map((a) => (
               <li key={a.id} className="list-group-item d-flex align-items-center justify-content-between">
                 <span className="small">{a.label} <span className="text-muted">({Math.round(a.sizeBytes / 1024)} KB)</span></span>
-                <button className="btn btn-sm btn-light text-danger" onClick={() => removeAttachment(a)}>
+                <button className="btn btn-sm btn-outline-danger" onClick={() => removeAttachment(a)}>
                   <iconify-icon icon="solar:trash-bin-trash-line-duotone"></iconify-icon>
                 </button>
               </li>

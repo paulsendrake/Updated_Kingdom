@@ -885,11 +885,14 @@ async function chargeVaultAchAndCreateSubscription({
     `INSERT INTO invoices
        (payment_token, invoice_number, contact_id, issue_date, due_date, currency,
         subtotal, tax_rate, tax_amount, discount_rate, discount_amount, total,
-        amount_paid, balance_due, status, memo)
+        amount_paid, balance_due, status, memo, lms_course_pricing_id)
      VALUES
        (:payment_token, :invoice_number, :contact_id, :issue_date, :due_date, 'USD',
-        :amount, 0, 0, 0, 0, :total, 0, :total, 'sent', :memo)`,
-    { payment_token: paymentToken, invoice_number: number, contact_id: contactId, issue_date: today, due_date: today, amount, total: chargeAmount, memo }
+        :amount, 0, 0, 0, 0, :total, 0, :total, 'sent', :memo, :lms_course_pricing_id)`,
+    {
+      payment_token: paymentToken, invoice_number: number, contact_id: contactId, issue_date: today, due_date: today, amount, total: chargeAmount, memo,
+      lms_course_pricing_id: extraSubscriptionFields?.lms_course_pricing_id || null,
+    }
   );
   const invoiceId = inv.insertId;
   await db.query(
@@ -948,15 +951,16 @@ async function chargeVaultAchAndCreateSubscription({
   const [sub] = await db.query(
     `INSERT INTO subscriptions
        (name, contact_id, currency, interval_unit, interval_count, start_date, next_run_date, end_date,
-        status, auto_charge, gateway, gateway_profile_id, vault_profile_id, fund_id, membership_tier_id, owner_id)
+        status, auto_charge, gateway, gateway_profile_id, vault_profile_id, fund_id, membership_tier_id, lms_course_pricing_id, owner_id)
      VALUES
        (:name, :contact_id, 'USD', :interval_unit, :interval_count, :start_date, :next_run_date, :end_date,
-        'active', :auto_charge, 'valor', :gateway_profile_id, :vault_profile_id, :fund_id, :membership_tier_id, NULL)`,
+        'active', :auto_charge, 'valor', :gateway_profile_id, :vault_profile_id, :fund_id, :membership_tier_id, :lms_course_pricing_id, NULL)`,
     {
       name: memo, contact_id: contactId, interval_unit: intervalUnit, interval_count: intervalCount,
       start_date: today, next_run_date: nextRun, gateway_profile_id: String(vaultProfileId), vault_profile_id: vaultProfileId,
       fund_id: extraSubscriptionFields?.fund_id || null, membership_tier_id: extraSubscriptionFields?.membership_tier_id || null,
-      // Only a one-time membership sets these (services/membershipTerms.js);
+      lms_course_pricing_id: extraSubscriptionFields?.lms_course_pricing_id || null,
+      // Only a one-time membership/course sets these (services/membershipTerms.js);
       // every other caller keeps an open-ended, auto-charging subscription.
       end_date: extraSubscriptionFields?.end_date || null, auto_charge: extraSubscriptionFields?.auto_charge ?? 1,
     }
@@ -1085,6 +1089,49 @@ async function completeAddPaymentMethodACH({ cfg, intent, achFields }) {
   return { ok: true, vaultProfileId };
 }
 
+// Mirrors completeMembershipACH above, for a paid LMS course's ACH signup
+// (see routes/lmsCheckout.js, whose card-path /signup this parallels). The
+// one extra step vs. a membership: granting cohort access via the vendored
+// LMS engine's addMember() once the charge succeeds.
+async function completeLmsACH({ cfg, d, achFields }) {
+  const { eq } = require('drizzle-orm');
+  const { loadRuntime, contextFor } = require('../lms/runtime');
+  const { schema, db: lmsDb } = await loadRuntime();
+  const [course] = await lmsDb.select().from(schema.courses).where(eq(schema.courses.slug, d.course_slug));
+  if (!course || course.status !== 'published') return { ok: false, error: 'No such course.' };
+  const [[pricing]] = await db.query('SELECT * FROM lms_course_pricing WHERE course_id = :id', { id: course.id });
+  if (!pricing || pricing.access_type === 'free') return { ok: false, error: 'This course does not require payment.' };
+  if (!pricing.cohort_id) return { ok: false, error: 'This course is not yet configured for enrollment.' };
+
+  const donor = d.donor || {};
+  if (!donor.email) return { ok: false, error: 'Donor email is required' };
+  const contactId = await upsertContactFromDonor(donor, 'lms_course_signup');
+  const donorFullName = `${donor.first_name || ''} ${donor.last_name || ''}`.trim();
+  const { vaultProfileId, vaultId, achProfileId } = await vaultACHAccount(cfg, {
+    contactId, organizationId: null, customerName: donorFullName || 'Learner',
+    customerEmail: donor.email, customerPhone: donor.phone, ...achFields,
+  });
+
+  const amount = Number(pricing.price) || 0;
+  const frequency = pricing.allow_buyer_choice ? (d.frequency === 'monthly' ? 'monthly' : 'once') : (pricing.access_type === 'recurring' ? 'monthly' : 'once');
+  const { membershipTerms } = require('../services/membershipTerms');
+  const terms = frequency === 'monthly'
+    ? { intervalUnit: pricing.interval_unit, intervalCount: pricing.interval_count, autoCharge: 1, endDate: null, label: `every ${pricing.interval_unit}` }
+    : membershipTerms('once', new Date().toISOString().slice(0, 10));
+  const memo = `Course — ${course.title} (${terms.label})`;
+  const result = await chargeVaultAchAndCreateSubscription({
+    cfg, contactId, vaultId, achProfileId, vaultProfileId, amount, memo, achTxnType: achFields.ach_txn_type, email: donor.email,
+    intervalUnit: terms.intervalUnit, intervalCount: terms.intervalCount,
+    extraSubscriptionFields: { lms_course_pricing_id: pricing.id, end_date: terms.endDate, auto_charge: terms.autoCharge },
+  });
+  if (!result.ok) return result;
+
+  const context = await contextFor('system', 'admin');
+  const { lms } = await loadRuntime();
+  await lms.addMember(context, pricing.cohort_id, String(contactId));
+  return { ok: true, subscriptionId: result.subscriptionId, status: result.status };
+}
+
 router.post('/public/vault-ach/:intentId', publicPaymentLimiter, express.urlencoded({ extended: false }), async (req, res, next) => {
   const _achOrigin = (process.env.CLIENT_ORIGIN || 'http://localhost:5173').split(',')[0].trim();
   function htmlResult(payload) {
@@ -1132,6 +1179,8 @@ router.post('/public/vault-ach/:intentId', publicPaymentLimiter, express.urlenco
         result = await completeRecurringDonationACH({ cfg, d, achFields });
       } else if (intent.surface === 'add_payment_method') {
         result = await completeAddPaymentMethodACH({ cfg, intent, achFields });
+      } else if (intent.surface === 'lms') {
+        result = await completeLmsACH({ cfg, d, achFields });
       } else {
         result = { ok: false, error: 'Unknown request' };
       }
@@ -2365,6 +2414,17 @@ router.post('/:id/refund', requirePermission('payments.write'), async (req, res,
     await logActivity({
       userId: req.user.id, entityType: 'invoice', entityId: pay.invoice_id,
       action: 'refunded', description: `Refund recorded $${refundAmount.toFixed(2)}` });
+
+    // A refunded LMS course purchase loses access, same as a lapsed
+    // subscription does (billing-cron.js's revokeLmsAccessIfNeeded) — this
+    // covers BOTH one-time and recurring course purchases, since every LMS
+    // invoice carries this column regardless of frequency (a one-time
+    // purchase has no subscriptions row to key off of).
+    const [[lmsInvoice]] = await db.query('SELECT lms_course_pricing_id FROM invoices WHERE id = :id', { id: pay.invoice_id });
+    if (lmsInvoice?.lms_course_pricing_id) {
+      const { revokeLmsAccessIfNeeded } = require('../jobs/billing-cron');
+      await revokeLmsAccessIfNeeded({ lms_course_pricing_id: lmsInvoice.lms_course_pricing_id, contact_id: pay.contact_id, id: pay.invoice_id });
+    }
 
     // Send refund receipt email if contact has an email address
     if (pay.contact_email) {

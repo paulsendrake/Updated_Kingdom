@@ -87,6 +87,7 @@ const commerceSettingsRoutes = require('./routes/commerce-settings');
 const donationsRoutes     = require('./routes/donations');
 const membershipRoutes    = require('./routes/membership');
 const lmsRoutes           = require('./routes/lms');
+const lmsCheckoutRoutes   = require('./routes/lmsCheckout');
 const eventsRoutes        = require('./routes/events');
 const volunteersRoutes    = require('./routes/volunteers');
 const mobileApi                = require('./routes/mobileApi');
@@ -283,6 +284,10 @@ app.use('/api/commerce-settings', commerceSettingsRoutes);
 app.use('/api/donations',     donationsRoutes);
 app.use('/api/membership',    membershipRoutes);
 app.use('/api/lms',           lmsRoutes);
+// Separate mount, not nested under /api/lms — that router applies a blanket
+// requireAuth to every path under it, which would 401 these before they ever
+// reach a route handler. See routes/lmsCheckout.js's header comment.
+app.use('/api/lms-checkout',  lmsCheckoutRoutes);
 app.use('/api/events',        eventsRoutes);
 app.use('/api/volunteers',    volunteersRoutes);
 

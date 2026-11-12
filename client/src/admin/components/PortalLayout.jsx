@@ -2,20 +2,28 @@
 // Customer-facing portal layout
 // Shown for users with role 'portal' (or admin, which bypasses).
 // =============================================================================
+import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext.jsx';
 import BrandMark from './BrandMark.jsx';
+import LearningDrawer from './LearningDrawer.jsx';
 import { useConfirm } from '../../hooks/useConfirm.jsx';
 import { useAdminTheme } from '../../hooks/useAdminTheme.js';
+import { ModuleConfigProvider, useModuleConfig } from '../context/ModuleConfigContext.jsx';
 
 // Adding a future module (e.g. Membership, Golf) is just another entry here
 // plus a route in App.jsx and a scoped endpoint in portal.js following the
 // same getScope() pattern as /donations and /invoices below.
+//
+// 'learning' isn't a plain NavLink — it opens LearningDrawer instead (see
+// PortalLayout below), so every LMS feature (what you're enrolled in, what
+// else is on offer) is reachable from one entry point rather than a bare
+// page nav. Everything else here is unaffected.
 const navItems = [
   { to: '/portal/dashboard',        label: 'Dashboard',        icon: 'solar:screencast-2-line-duotone' },
   { to: '/portal/giving',           label: 'My Giving',        icon: 'solar:hand-heart-line-duotone' },
   { to: '/portal/membership',       label: 'My Membership',    icon: 'solar:medal-ribbons-star-line-duotone' },
-  { to: '/portal/learning',         label: 'Learning',         icon: 'solar:square-academic-cap-2-line-duotone' },
+  { key: 'lms', label: 'Learning', icon: 'solar:square-academic-cap-2-line-duotone', drawer: true },
   { to: '/portal/events',           label: 'My Events',        icon: 'solar:calendar-line-duotone' },
   { to: '/portal/orders',           label: 'My Orders',        icon: 'solar:bag-check-line-duotone' },
   { to: '/portal/invoices',         label: 'Invoices',         icon: 'solar:bill-list-line-duotone' },
@@ -24,11 +32,13 @@ const navItems = [
   { to: '/portal/profile',          label: 'My Profile',       icon: 'solar:user-line-duotone' },
 ];
 
-export default function PortalLayout() {
+function PortalLayoutInner() {
   useAdminTheme();
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const { confirm, dialog: confirmDialog } = useConfirm();
+  const { isSectionEnabled } = useModuleConfig();
+  const [learningOpen, setLearningOpen] = useState(false);
 
   async function doLogout() {
     if (!(await confirm('Sign out of the portal?', { danger: false, confirmLabel: 'Sign Out' }))) return;
@@ -37,6 +47,7 @@ export default function PortalLayout() {
   }
 
   const initials = `${user?.first_name?.[0] || ''}${user?.last_name?.[0] || ''}` || user?.email?.[0]?.toUpperCase() || '?';
+  const visibleNavItems = navItems.filter((n) => !n.key || isSectionEnabled(n.key));
 
   return (
     <div style={{ minHeight: '100vh', background: '#F8F5EF' }}>
@@ -62,23 +73,35 @@ export default function PortalLayout() {
         {/* Tabs — scrollable on mobile */}
         <div className="container px-0 px-sm-3" style={{ maxWidth: 1200 }}>
           <ul className="nav gap-1 portal-nav-scroll" style={{ borderBottom: 'none', overflowX: 'auto', flexWrap: 'nowrap', WebkitOverflowScrolling: 'touch' }}>
-            {navItems.map((n) => (
-              <li className="nav-item" key={n.to}>
-                <NavLink
-                  to={n.to}
-                  className={({ isActive }) =>
-                    'nav-link d-flex align-items-center gap-1 gap-sm-2 px-2 px-sm-3 py-2' +
-                    (isActive ? ' fw-bold' : ' text-dark')
-                  }
-                  style={({ isActive }) => ({
-                    borderBottom: isActive ? '3px solid var(--secondary, #4b5563)' : '3px solid transparent',
-                    color: isActive ? 'var(--brand, #1f2937)' : undefined,
-                    whiteSpace: 'nowrap',
-                  })}
-                >
-                  <iconify-icon icon={n.icon}></iconify-icon>
-                  <span>{n.label}</span>
-                </NavLink>
+            {visibleNavItems.map((n) => (
+              <li className="nav-item" key={n.to || n.key}>
+                {n.drawer ? (
+                  <button
+                    type="button"
+                    className="nav-link d-flex align-items-center gap-1 gap-sm-2 px-2 px-sm-3 py-2 text-dark bg-transparent border-0"
+                    style={{ borderBottom: '3px solid transparent', whiteSpace: 'nowrap' }}
+                    onClick={() => setLearningOpen(true)}
+                  >
+                    <iconify-icon icon={n.icon}></iconify-icon>
+                    <span>{n.label}</span>
+                  </button>
+                ) : (
+                  <NavLink
+                    to={n.to}
+                    className={({ isActive }) =>
+                      'nav-link d-flex align-items-center gap-1 gap-sm-2 px-2 px-sm-3 py-2' +
+                      (isActive ? ' fw-bold' : ' text-dark')
+                    }
+                    style={({ isActive }) => ({
+                      borderBottom: isActive ? '3px solid var(--secondary, #4b5563)' : '3px solid transparent',
+                      color: isActive ? 'var(--brand, #1f2937)' : undefined,
+                      whiteSpace: 'nowrap',
+                    })}
+                  >
+                    <iconify-icon icon={n.icon}></iconify-icon>
+                    <span>{n.label}</span>
+                  </NavLink>
+                )}
               </li>
             ))}
           </ul>
@@ -89,6 +112,19 @@ export default function PortalLayout() {
         <Outlet />
       </main>
       {confirmDialog}
+      <LearningDrawer show={learningOpen} onClose={() => setLearningOpen(false)} />
     </div>
+  );
+}
+
+// Own ModuleConfigProvider instance — the admin-side one is mounted inside
+// AppLayout.jsx, a sibling route tree the portal never renders under, so
+// isSectionEnabled() would otherwise always see the context's hardcoded
+// "nothing hidden" default rather than the real Module Manager setting.
+export default function PortalLayout() {
+  return (
+    <ModuleConfigProvider>
+      <PortalLayoutInner />
+    </ModuleConfigProvider>
   );
 }
