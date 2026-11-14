@@ -620,9 +620,10 @@ export default function LmsCourseEditorPage() {
                     onChange={(e) => setQuizForm({ ...quizForm, drawSize: e.target.value })}
                   />
                   <div className="form-text">
-                    Leave blank to ask every question. Enter a smaller number to draw that
-                    many at random from the {quizForm.questions.length}-question bank, so
-                    each attempt gets a different paper.
+                    Leave blank to ask every question. Enter a smaller number and the
+                    quiz becomes a bank: each sitting draws that many of the{' '}
+                    {quizForm.questions.length} at random, in a random order. A draw is
+                    fresh each sitting, so it may repeat some of the same questions.
                   </div>
                 </div>
               </div>

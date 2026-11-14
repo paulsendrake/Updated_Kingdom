@@ -46,6 +46,11 @@ vendoring is one of the three supported ways to consume this module.
    any other, so leaving it `char(36)` would have given this host a table
    whose `user_id` could never match a contact.
 
+   The comment above that table in the migration was rewritten to describe
+   this host rather than an integrator who still has the edit to make.
+   `attempt_id` carrying no foreign key is not a seam — upstream's MySQL
+   migration has none either.
+
 Nothing else was touched. The services, ports, store interface, Postgres
 schema/migration, and Drizzle store implementation are byte-for-byte
 upstream at the commit named above, with the question-banks change applied.

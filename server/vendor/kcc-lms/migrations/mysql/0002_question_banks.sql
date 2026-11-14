@@ -22,9 +22,12 @@ ALTER TABLE lms_quizzes ADD COLUMN draw_size int null;
 -- VENDORED SEAM — user_id is varchar(20), matching the three columns
 -- 0001_lms.sql already converted: this host's learners are `contacts`
 -- (int unsigned), not `users` (uuid), so there is no DB-level foreign key
--- against them either. See VENDORED.md. attempt_id carries no foreign key for the same reason the host's
--- other id columns sometimes do not — it is set by the application in the
--- same statement that writes the attempt.
+-- against them either. See VENDORED.md.
+--
+-- attempt_id carries no foreign key either. The PostgreSQL schema cascades
+-- it from lms_quiz_attempts; nothing in this app deletes an attempt, so the
+-- cascade has no path to fire, and it is set by the application in the same
+-- statement that writes the attempt.
 create table if not exists lms_quiz_draws (
   id           char(36) not null,
   quiz_id      char(36) not null,
