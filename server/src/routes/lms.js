@@ -429,6 +429,9 @@ const quizSchema = z.object({
   instructions: z.string().optional().nullable(),
   passingScore: z.number().int().min(1).max(100).optional(),
   maxAttempts: z.number().int().min(0).optional(),
+  // Null, absent or 0 means "ask every question". A number means draw that
+  // many at random per attempt; the module refuses a draw bigger than the bank.
+  drawSize: z.number().int().min(0).optional().nullable(),
   questions: z.array(z.object({
     prompt: z.string().min(2),
     explanation: z.string().optional().nullable(),

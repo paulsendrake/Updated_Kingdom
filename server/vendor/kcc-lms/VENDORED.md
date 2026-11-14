@@ -3,7 +3,8 @@
 Source: https://github.com/paulsendrake/KCLMS, commit `d5570d4`
 ("Run on MySQL as well as PostgreSQL, with one set of rules"), plus the
 question-banks change from branch `claude/question-banks` applied on top of
-it (see "Question banks" below).
+it, then commit `6f6e387` ("Say what happened when a learner's paper is
+replaced under them") on top of that (see "Question banks" below).
 
 This is a vendored copy, not an npm dependency, because the one seam the
 module asks integrators to edit — the `user_id` columns — needed a real
@@ -78,6 +79,18 @@ What it adds:
 Marking is scoped to the drawn questions. Scoring against the whole bank
 counts the unasked ones as wrong, which turns a learner who answered all of
 their questions correctly into a fail.
+
+Saving a quiz replaces its questions outright, so every save mints new
+question ids and invalidates any draw dealt before it. Reading the paper
+again deals a fresh hand; submitting one dealt before the save cannot be
+marked, and says so ("This quiz changed while you were taking it...")
+rather than claiming the quiz has no questions.
+
+`draw_size` is set from the course editor, next to Passing Score and Max
+Attempts, as "Questions Per Attempt" — blank there means ask every
+question. Both sides refuse a draw bigger than the bank; the module's
+refusal is the authority and the editor's is only there to save a round
+trip.
 
 **Apply `migrations/mysql/0002_question_banks.sql` before deploying this.**
 The code reads `draw_size` and `lms_quiz_draws`; without the migration every

@@ -189,8 +189,15 @@ export async function submitAttempt(context, input) {
     const draw = quiz.drawSize === null ? null : await context.store.openDrawFor(quiz.id, context.viewer.id);
     const drawn = draw === null ? null : new Set(draw.questionIds);
     const questions = drawn === null ? whole : whole.filter((question) => drawn.has(question.id));
-    if (questions.length === 0)
-        throw new LmsInvalid('That quiz has no questions yet.');
+    // `whole` was checked non-empty above, and with no draw `questions` is
+    // `whole`, so reaching this means a draw whose questions have all gone —
+    // authoring replaced them while this learner was sitting the paper. Saying
+    // "no questions" would be a lie about the quiz and leave them with nothing
+    // to do; reloading the lesson deals a fresh hand (see dealtPaper), so say
+    // that instead.
+    if (questions.length === 0) {
+        throw new LmsInvalid('This quiz changed while you were taking it. Reload the lesson to be given a fresh set of questions.');
+    }
     const marked = markAttempt({
         questions,
         options,
