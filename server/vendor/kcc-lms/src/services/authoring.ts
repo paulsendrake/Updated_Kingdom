@@ -352,6 +352,8 @@ export async function upsertQuiz(
     instructions?: string | null;
     passingScore?: number;
     maxAttempts?: number;
+    /** Ask this many of the questions rather than all of them. */
+    drawSize?: number | null;
     questions: {
       prompt: string;
       explanation?: string | null;
@@ -363,6 +365,23 @@ export async function upsertQuiz(
 
   const passingScore = Math.min(100, Math.max(1, Math.round(input.passingScore ?? 80)));
   const maxAttempts = Math.max(0, Math.round(input.maxAttempts ?? 3));
+
+  /*
+   * A draw of zero, or of more questions than the bank holds, is the same as
+   * no draw at all — so it is stored as none rather than as a number that
+   * silently means something else. Asking for more than exists is a mistake
+   * worth refusing rather than quietly rounding down, because the author
+   * thinks they have written more questions than they have.
+   */
+  const drawSize =
+    input.drawSize === null || input.drawSize === undefined
+      ? null
+      : Math.max(0, Math.round(input.drawSize)) || null;
+  if (drawSize !== null && drawSize > input.questions.length) {
+    throw new LmsInvalid(
+      `This quiz asks for ${drawSize} questions but only has ${input.questions.length}.`,
+    );
+  }
 
   if (input.questions.length === 0) throw new LmsInvalid('A quiz needs at least one question.');
   for (const question of input.questions) {
@@ -383,6 +402,7 @@ export async function upsertQuiz(
     instructions: input.instructions?.trim() || null,
     passingScore,
     maxAttempts,
+    drawSize,
     questions: input.questions.map((question) => ({
       id: context.store.newId(),
       prompt: requireText(question.prompt, 'A question', 2, 1000),

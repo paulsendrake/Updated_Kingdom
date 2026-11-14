@@ -26,6 +26,7 @@ const pgTables = {
     quizQuestions: pg.quizQuestions,
     quizOptions: pg.quizOptions,
     quizAttempts: pg.quizAttempts,
+    quizDraws: pg.quizDraws,
 };
 const mysqlTables = {
     cohorts: mysql.cohorts,
@@ -40,6 +41,7 @@ const mysqlTables = {
     quizQuestions: mysql.quizQuestions,
     quizOptions: mysql.quizOptions,
     quizAttempts: mysql.quizAttempts,
+    quizDraws: mysql.quizDraws,
 };
 /** A store over a Drizzle **PostgreSQL** handle. */
 export function postgresStore(input) {

@@ -241,8 +241,39 @@ export const quizzes = pgTable('lms_quizzes', {
     passingScore: integer('passing_score').notNull().default(80),
     /** Zero means unlimited. */
     maxAttempts: integer('max_attempts').notNull().default(3),
+    /**
+     * How many questions to ask out of the bank, or null to ask all of them.
+     *
+     * Null is the old behaviour and the default, so every quiz that existed
+     * before this column did behaves exactly as it did. Set it and the quiz
+     * becomes a bank: each learner is dealt `drawSize` of its questions, so
+     * two people sitting the same quiz do not sit the same paper.
+     */
+    drawSize: integer('draw_size'),
     ...timestamps,
 }, (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)]);
+/**
+ * The hand a learner was dealt, kept because it has to outlive the request.
+ *
+ * A paper is fetched and submitted in two separate calls, and the attempt row
+ * does not exist until the second. If the draw were made fresh each time the
+ * paper was read, a refresh would deal a different hand, and the answers
+ * posted back would be marked against questions nobody was asked. So the draw
+ * is written when the paper is first handed out, reused while it is open, and
+ * stamped with `attemptId` when it is spent.
+ */
+export const quizDraws = pgTable('lms_quiz_draws', {
+    id: uuid('id').primaryKey().defaultRandom(),
+    quizId: uuid('quiz_id')
+        .notNull()
+        .references(() => quizzes.id, { onDelete: 'cascade' }),
+    userId: hostUserId('user_id'),
+    /** The drawn question ids, in the order they are to be asked. */
+    questionIds: jsonb('question_ids').$type().notNull().default([]),
+    drawnAt: timestamp('drawn_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Null while the draw is open; set to the attempt that used it. */
+    attemptId: uuid('attempt_id').references(() => quizAttempts.id, { onDelete: 'cascade' }),
+}, (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)]);
 export const quizQuestions = pgTable('lms_quiz_questions', {
     id: uuid('id').primaryKey().defaultRandom(),
     quizId: uuid('quiz_id')

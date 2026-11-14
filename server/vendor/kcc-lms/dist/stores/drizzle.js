@@ -12,7 +12,7 @@
  * contract, and the probe suite runs this file against both engines. Spending
  * the type safety here instead would buy less and cost more.
  */
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { likePattern } from '../like.js';
 /**
  * Rows from a raw `execute`, whichever driver is underneath.
@@ -683,6 +683,7 @@ export function drizzleStore(input) {
                 instructions: row.quiz.instructions ?? null,
                 passingScore: asNumber(row.quiz.passingScore),
                 maxAttempts: asNumber(row.quiz.maxAttempts),
+                drawSize: row.quiz.drawSize === null || row.quiz.drawSize === undefined ? null : asNumber(row.quiz.drawSize),
                 courseId: row.courseId,
                 lessonPublished: asBool(row.lessonPublished),
             };
@@ -698,7 +699,50 @@ export function drizzleStore(input) {
                 instructions: row.instructions ?? null,
                 passingScore: asNumber(row.passingScore),
                 maxAttempts: asNumber(row.maxAttempts),
+                drawSize: row.drawSize === null || row.drawSize === undefined ? null : asNumber(row.drawSize),
             };
+        },
+        async questionIdsFor(quizId) {
+            const rows = await db
+                .select({ id: t.quizQuestions.id })
+                .from(t.quizQuestions)
+                .where(eq(t.quizQuestions.quizId, quizId))
+                .orderBy(asc(t.quizQuestions.position), asc(t.quizQuestions.id));
+            return rows.map((row) => row.id);
+        },
+        async openDrawFor(quizId, userId) {
+            const [row] = await db
+                .select()
+                .from(t.quizDraws)
+                .where(and(eq(t.quizDraws.quizId, quizId), eq(t.quizDraws.userId, userId), isNull(t.quizDraws.attemptId)))
+                .orderBy(desc(t.quizDraws.drawnAt))
+                .limit(1);
+            if (!row)
+                return null;
+            return {
+                id: row.id,
+                quizId: row.quizId,
+                userId: String(row.userId),
+                // MySQL hands json back parsed; a string here would mean a driver
+                // that does not, and silently iterating its characters would deal a
+                // paper of single letters.
+                questionIds: Array.isArray(row.questionIds)
+                    ? row.questionIds
+                    : JSON.parse(String(row.questionIds ?? '[]')),
+                attemptId: row.attemptId ?? null,
+            };
+        },
+        async insertDraw(draw) {
+            await db.insert(t.quizDraws).values({
+                id: draw.id,
+                quizId: draw.quizId,
+                userId: draw.userId,
+                questionIds: draw.questionIds,
+                drawnAt: draw.drawnAt,
+            });
+        },
+        async spendDraw(drawId, attemptId) {
+            await db.update(t.quizDraws).set({ attemptId }).where(eq(t.quizDraws.id, drawId));
         },
         async paperFor(quizId) {
             /*
@@ -807,6 +851,7 @@ export function drizzleStore(input) {
                     instructions: draft.instructions,
                     passingScore: draft.passingScore,
                     maxAttempts: draft.maxAttempts,
+                    drawSize: draft.drawSize ?? null,
                     updatedAt: at,
                 };
                 if (existing[0]) {
@@ -881,6 +926,7 @@ export function drizzleStore(input) {
                 instructions: quiz.instructions ?? null,
                 passingScore: asNumber(quiz.passingScore),
                 maxAttempts: asNumber(quiz.maxAttempts),
+                drawSize: quiz.drawSize === null || quiz.drawSize === undefined ? null : asNumber(quiz.drawSize),
                 questions: [...questions.values()],
             };
         },
