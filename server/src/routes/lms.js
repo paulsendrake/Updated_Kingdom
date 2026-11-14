@@ -21,7 +21,7 @@
 // =============================================================================
 const router = require('express').Router();
 const { z } = require('zod');
-const { eq } = require('drizzle-orm');
+const { eq, inArray } = require('drizzle-orm');
 const multer = require('multer');
 const { db } = require('../db');
 const { requireAuth, requirePermission } = require('../middleware/auth');
@@ -429,6 +429,9 @@ const quizSchema = z.object({
   instructions: z.string().optional().nullable(),
   passingScore: z.number().int().min(1).max(100).optional(),
   maxAttempts: z.number().int().min(0).optional(),
+  // Null, absent or 0 means "ask every question". A number means draw that
+  // many at random per attempt; the module refuses a draw bigger than the bank.
+  drawSize: z.number().int().min(0).optional().nullable(),
   questions: z.array(z.object({
     prompt: z.string().min(2),
     explanation: z.string().optional().nullable(),
@@ -647,13 +650,44 @@ router.get('/submissions', requirePermission('lms.read'), async (req, res, next)
       { status }
     );
     const { schema, db: lmsDb } = await loadRuntime();
+
+    /*
+     * Only the lessons this queue is actually about.
+     *
+     * `lessonIds` was already being built here and then used for nothing but
+     * a length check — the select had no `where`, so opening the marking
+     * queue read every lesson, every module and every course in the system,
+     * and then matched them up with a `.find()` inside a `.map()`, which is
+     * quadratic. With a handful of courses that is invisible; it gets slower
+     * every time somebody publishes one, and the marking queue is a page
+     * staff sit on.
+     *
+     * Three narrowed reads and two maps instead. Same output.
+     */
     const lessonIds = [...new Set(rows.map((r) => r.lesson_id))];
     const lessons = lessonIds.length
-      ? await lmsDb.select({ id: schema.lessons.id, title: schema.lessons.title, moduleId: schema.lessons.moduleId }).from(schema.lessons)
+      ? await lmsDb
+          .select({ id: schema.lessons.id, title: schema.lessons.title, moduleId: schema.lessons.moduleId })
+          .from(schema.lessons)
+          .where(inArray(schema.lessons.id, lessonIds))
       : [];
-    const modules = await lmsDb.select({ id: schema.modules.id, courseId: schema.modules.courseId }).from(schema.modules);
-    const courses = await lmsDb.select({ id: schema.courses.id, title: schema.courses.title }).from(schema.courses);
-    const courseTitleByModule = new Map(modules.map((m) => [m.id, courses.find((c) => c.id === m.courseId)?.title]));
+    const moduleIds = [...new Set(lessons.map((l) => l.moduleId))];
+    const modules = moduleIds.length
+      ? await lmsDb
+          .select({ id: schema.modules.id, courseId: schema.modules.courseId })
+          .from(schema.modules)
+          .where(inArray(schema.modules.id, moduleIds))
+      : [];
+    const courseIds = [...new Set(modules.map((m) => m.courseId))];
+    const courses = courseIds.length
+      ? await lmsDb
+          .select({ id: schema.courses.id, title: schema.courses.title })
+          .from(schema.courses)
+          .where(inArray(schema.courses.id, courseIds))
+      : [];
+
+    const courseTitleById = new Map(courses.map((c) => [c.id, c.title]));
+    const courseTitleByModule = new Map(modules.map((m) => [m.id, courseTitleById.get(m.courseId)]));
     const lessonById = new Map(lessons.map((l) => [l.id, l]));
 
     res.json(rows.map((r) => {

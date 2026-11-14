@@ -29,6 +29,7 @@ const pgTables: LmsTables = {
   quizQuestions: pg.quizQuestions,
   quizOptions: pg.quizOptions,
   quizAttempts: pg.quizAttempts,
+  quizDraws: pg.quizDraws,
 };
 
 const mysqlTables: LmsTables = {
@@ -44,6 +45,7 @@ const mysqlTables: LmsTables = {
   quizQuestions: mysql.quizQuestions,
   quizOptions: mysql.quizOptions,
   quizAttempts: mysql.quizAttempts,
+  quizDraws: mysql.quizDraws,
 };
 
 /** A store over a Drizzle **PostgreSQL** handle. */

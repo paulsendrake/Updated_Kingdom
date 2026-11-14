@@ -21,6 +21,7 @@ export function lmsContext(input) {
         viewer: input.viewer,
         ports,
         clock: ports.clock ?? systemClock,
+        random: ports.random ?? Math.random,
     };
 }
 /**

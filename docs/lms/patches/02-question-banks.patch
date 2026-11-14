@@ -1,0 +1,1224 @@
+diff --git a/client/src/admin/pages/LmsCourseEditorPage.jsx b/client/src/admin/pages/LmsCourseEditorPage.jsx
+index afc9fb5..27f494c 100644
+--- a/client/src/admin/pages/LmsCourseEditorPage.jsx
++++ b/client/src/admin/pages/LmsCourseEditorPage.jsx
+@@ -32,7 +32,7 @@ function blankLesson(moduleId) {
+ }
+ function blankQuiz(lessonId) {
+   return {
+-    lessonId, title: '', instructions: '', passingScore: 80, maxAttempts: 3,
++    lessonId, title: '', instructions: '', passingScore: 80, maxAttempts: 3, drawSize: '',
+     questions: [{ prompt: '', explanation: '', options: [{ label: '', isCorrect: true }, { label: '', isCorrect: false }] }],
+   };
+ }
+@@ -209,6 +209,7 @@ export default function LmsCourseEditorPage() {
+         id: data.id, lessonId: lesson.id,
+         title: data.title, instructions: data.instructions || '',
+         passingScore: data.passingScore, maxAttempts: data.maxAttempts,
++        drawSize: data.drawSize === null || data.drawSize === undefined ? '' : String(data.drawSize),
+         questions: data.questions.map((q) => ({
+           prompt: q.prompt, explanation: q.explanation || '',
+           options: q.options.map((o) => ({ label: o.label, isCorrect: o.isCorrect })),
+@@ -267,12 +268,24 @@ export default function LmsCourseEditorPage() {
+       if (!q.prompt.trim()) { setQuizError('Every question needs a prompt.'); return; }
+       if (q.options.some((o) => !o.label.trim())) { setQuizError('Every option needs text.'); return; }
+     }
++    // Blank or 0 means "ask every question"; anything else must fit the bank.
++    const drawText = String(quizForm.drawSize ?? '').trim();
++    const drawSize = drawText === '' ? null : Number(drawText);
++    if (drawSize !== null && (!Number.isInteger(drawSize) || drawSize < 0)) {
++      setQuizError('Questions per attempt must be a whole number, or blank to ask every question.');
++      return;
++    }
++    if (drawSize !== null && drawSize > quizForm.questions.length) {
++      setQuizError(`This quiz asks for ${drawSize} questions but only has ${quizForm.questions.length}.`);
++      return;
++    }
+     try {
+       await api.put(`/lms/lessons/${quizForm.lessonId}/quiz`, {
+         title: quizForm.title.trim(),
+         instructions: quizForm.instructions.trim() || null,
+         passingScore: Number(quizForm.passingScore),
+         maxAttempts: Number(quizForm.maxAttempts),
++        drawSize,
+         questions: quizForm.questions,
+       });
+       setQuizShow(false);
+@@ -587,14 +600,32 @@ export default function LmsCourseEditorPage() {
+                   <label className="form-label">Instructions</label>
+                   <textarea className="form-control" rows="2" value={quizForm.instructions} onChange={(e) => setQuizForm({ ...quizForm, instructions: e.target.value })} />
+                 </div>
+-                <div className="col-md-6">
++                <div className="col-md-4">
+                   <label className="form-label">Passing Score (%)</label>
+                   <input type="number" min="1" max="100" className="form-control" value={quizForm.passingScore} onChange={(e) => setQuizForm({ ...quizForm, passingScore: e.target.value })} />
+                 </div>
+-                <div className="col-md-6">
++                <div className="col-md-4">
+                   <label className="form-label">Max Attempts <span className="text-muted small">(0 = unlimited)</span></label>
+                   <input type="number" min="0" className="form-control" value={quizForm.maxAttempts} onChange={(e) => setQuizForm({ ...quizForm, maxAttempts: e.target.value })} />
+                 </div>
++                <div className="col-md-4">
++                  <label className="form-label">Questions Per Attempt</label>
++                  <input
++                    type="number"
++                    min="0"
++                    max={quizForm.questions.length}
++                    className="form-control"
++                    placeholder={`All ${quizForm.questions.length}`}
++                    value={quizForm.drawSize}
++                    onChange={(e) => setQuizForm({ ...quizForm, drawSize: e.target.value })}
++                  />
++                  <div className="form-text">
++                    Leave blank to ask every question. Enter a smaller number and the
++                    quiz becomes a bank: each sitting draws that many of the{' '}
++                    {quizForm.questions.length} at random, in a random order. A draw is
++                    fresh each sitting, so it may repeat some of the same questions.
++                  </div>
++                </div>
+               </div>
+ 
+               {quizForm.questions.map((q, qi) => (
+diff --git a/server/src/routes/lms.js b/server/src/routes/lms.js
+index fb61d5d..f965e0e 100644
+--- a/server/src/routes/lms.js
++++ b/server/src/routes/lms.js
+@@ -429,6 +429,9 @@ const quizSchema = z.object({
+   instructions: z.string().optional().nullable(),
+   passingScore: z.number().int().min(1).max(100).optional(),
+   maxAttempts: z.number().int().min(0).optional(),
++  // Null, absent or 0 means "ask every question". A number means draw that
++  // many at random per attempt; the module refuses a draw bigger than the bank.
++  drawSize: z.number().int().min(0).optional().nullable(),
+   questions: z.array(z.object({
+     prompt: z.string().min(2),
+     explanation: z.string().optional().nullable(),
+diff --git a/server/vendor/kcc-lms/VENDORED.md b/server/vendor/kcc-lms/VENDORED.md
+index b225b05..b3bb394 100644
+--- a/server/vendor/kcc-lms/VENDORED.md
++++ b/server/vendor/kcc-lms/VENDORED.md
+@@ -1,7 +1,10 @@
+ # Vendoring notes
+ 
+ Source: https://github.com/paulsendrake/KCLMS, commit `d5570d4`
+-("Run on MySQL as well as PostgreSQL, with one set of rules").
++("Run on MySQL as well as PostgreSQL, with one set of rules"), plus the
++question-banks change from branch `claude/question-banks` applied on top of
++it, then commit `6f6e387` ("Say what happened when a learner's paper is
++replaced under them") on top of that (see "Question banks" below).
+ 
+ This is a vendored copy, not an npm dependency, because the one seam the
+ module asks integrators to edit — the `user_id` columns — needed a real
+@@ -37,9 +40,66 @@ vendoring is one of the three supported ways to consume this module.
+    to `'contacts'` for documentation accuracy; it isn't used for a real DB
+    constraint anywhere so this is cosmetic.
+ 
++3. **`src/schema/mysql.ts` and `migrations/mysql/0002_question_banks.sql`**
++   — the new `lms_quiz_draws.user_id` follows the same seam as the three
++   columns above: `varchar(20)`, no foreign key. It is a learner column like
++   any other, so leaving it `char(36)` would have given this host a table
++   whose `user_id` could never match a contact.
++
++   The comment above that table in the migration was rewritten to describe
++   this host rather than an integrator who still has the edit to make.
++   `attempt_id` carrying no foreign key is not a seam — upstream's MySQL
++   migration has none either.
++
+ Nothing else was touched. The services, ports, store interface, Postgres
+ schema/migration, and Drizzle store implementation are byte-for-byte
+-upstream.
++upstream at the commit named above, with the question-banks change applied.
++
++## Question banks
++
++Vendored from `claude/question-banks` rather than from a released upstream
++commit, because it was written for this host's benefit and upstream has
++since moved on in ways this app is not ready for — the module's `dist/`
++layout changed from flat to `dist/esm` + `dist/cjs`, and
++`server/src/lms/runtime.js` imports `dist/index.js` directly. Taking
++upstream wholesale would break that import and drag in an HTTP layer, a
++browser client and React components this server does not use.
++
++So this is deliberately a narrow vendor: the question-banks commit applied
++to `d5570d4`, built with this directory's own `tsconfig.build.json`, which
++keeps the flat `dist/` the server expects.
++
++What it adds:
++
++* `lms_quizzes.draw_size` — null (the default) means ask every question, as
++  before. Set it and the quiz becomes a bank: each learner is dealt that
++  many of its questions.
++* `lms_quiz_draws` — the hand a learner was dealt. A paper is read in one
++  request and answered in another, so the draw has to be written down;
++  otherwise a refresh reshuffles it and the answers are marked against
++  questions nobody was asked.
++* `ports.random` — alongside `ports.clock`, so a deliberately random feature
++  can be asserted in a test.
++
++Marking is scoped to the drawn questions. Scoring against the whole bank
++counts the unasked ones as wrong, which turns a learner who answered all of
++their questions correctly into a fail.
++
++Saving a quiz replaces its questions outright, so every save mints new
++question ids and invalidates any draw dealt before it. Reading the paper
++again deals a fresh hand; submitting one dealt before the save cannot be
++marked, and says so ("This quiz changed while you were taking it...")
++rather than claiming the quiz has no questions.
++
++`draw_size` is set from the course editor, next to Passing Score and Max
++Attempts, as "Questions Per Attempt" — blank there means ask every
++question. Both sides refuse a draw bigger than the bank; the module's
++refusal is the authority and the editor's is only there to save a round
++trip.
++
++**Apply `migrations/mysql/0002_question_banks.sql` before deploying this.**
++The code reads `draw_size` and `lms_quiz_draws`; without the migration every
++quiz read fails.
+ 
+ ## Build
+ 
+diff --git a/server/vendor/kcc-lms/dist/context.js b/server/vendor/kcc-lms/dist/context.js
+index c79f13d..59fff89 100644
+--- a/server/vendor/kcc-lms/dist/context.js
++++ b/server/vendor/kcc-lms/dist/context.js
+@@ -21,6 +21,7 @@ export function lmsContext(input) {
+         viewer: input.viewer,
+         ports,
+         clock: ports.clock ?? systemClock,
++        random: ports.random ?? Math.random,
+     };
+ }
+ /**
+diff --git a/server/vendor/kcc-lms/dist/schema/mysql.js b/server/vendor/kcc-lms/dist/schema/mysql.js
+index 1f3a754..f254b72 100644
+--- a/server/vendor/kcc-lms/dist/schema/mysql.js
++++ b/server/vendor/kcc-lms/dist/schema/mysql.js
+@@ -40,13 +40,8 @@
+  * case-sensitive search, and that is worth knowing before they wonder why.
+  */
+ import { boolean, char, index, int, json, mysqlEnum, mysqlTable, primaryKey, text, timestamp, uniqueIndex, varchar, } from 'drizzle-orm/mysql-core';
+-/**
+- * See the note of the same name in `./pg.ts`. The seam is identical, except
+- * that this copy is wired to Kingdom Connections' `contacts` table (church
+- * members) rather than `users` (internal staff) — see the header note in
+- * `migrations/mysql/0001_lms.sql`.
+- */
+-export const HOST_USERS_TABLE = 'contacts';
++/** See the note of the same name in `./pg.ts`. The seam is identical. */
++export const HOST_USERS_TABLE = 'users';
+ /**
+  * Timestamps.
+  *
+@@ -66,9 +61,9 @@ const timestamps = {
+ };
+ const id = () => char('id', { length: 36 }).primaryKey();
+ const ref = (column) => char(column, { length: 36 }).notNull();
+-// Kingdom Connections wiring: these three columns hold a `contacts.id`
+-// (int unsigned, so a short numeric string fits easily), not a 36-char
+-// UUID. See migrations/mysql/0001_lms.sql for why there is no DB-level FK.
++// VENDORED SEAM — see VENDORED.md. Kingdom Connections' learners are
++// `contacts` (int unsigned), not `users` (uuid), so every column that
++// references a learner is varchar(20) and carries no DB-level foreign key.
+ const userRef = (column) => varchar(column, { length: 20 }).notNull();
+ /* --------------------------------------------------------------- cohorts */
+ export const cohorts = mysqlTable('lms_cohorts', {
+@@ -106,7 +101,7 @@ export const courses = mysqlTable('lms_courses', {
+     outcomes: json('outcomes').$type().notNull(),
+     prerequisites: json('prerequisites').$type().notNull(),
+     topics: json('topics').$type().notNull(),
+-    createdBy: varchar('created_by', { length: 20 }),
++    createdBy: char('created_by', { length: 36 }),
+     ...timestamps,
+ }, (t) => [
+     uniqueIndex('lms_courses_slug_key').on(t.slug),
+@@ -186,8 +181,37 @@ export const quizzes = mysqlTable('lms_quizzes', {
+     instructions: text('instructions'),
+     passingScore: int('passing_score').notNull().default(80),
+     maxAttempts: int('max_attempts').notNull().default(3),
++    /**
++     * How many questions to ask out of the bank, or null to ask all of them.
++     *
++     * Null is the old behaviour and the default, so every quiz that existed
++     * before this column did behaves exactly as it did. Set it and the quiz
++     * becomes a bank: each learner is dealt `drawSize` of its questions, so
++     * two people sitting the same quiz do not sit the same paper.
++     */
++    drawSize: int('draw_size'),
+     ...timestamps,
+ }, (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)]);
++/**
++ * The hand a learner was dealt, kept because it has to outlive the request.
++ *
++ * A paper is fetched and submitted in two separate calls, and the attempt row
++ * does not exist until the second. If the draw were made fresh each time the
++ * paper was read, a refresh would deal a different hand, and the answers
++ * posted back would be marked against questions nobody was asked. So the draw
++ * is written when the paper is first handed out, reused while it is open, and
++ * stamped with `attemptId` when it is spent.
++ */
++export const quizDraws = mysqlTable('lms_quiz_draws', {
++    id: id(),
++    quizId: ref('quiz_id'),
++    userId: userRef('user_id'),
++    /** The drawn question ids, in the order they are to be asked. */
++    questionIds: json('question_ids').$type().notNull(),
++    drawnAt: timestamp('drawn_at', { fsp: 3 }).notNull().defaultNow(),
++    /** Null while the draw is open; set to the attempt that used it. */
++    attemptId: char('attempt_id', { length: 36 }),
++}, (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)]);
+ export const quizQuestions = mysqlTable('lms_quiz_questions', {
+     id: id(),
+     quizId: ref('quiz_id'),
+diff --git a/server/vendor/kcc-lms/dist/schema/pg.js b/server/vendor/kcc-lms/dist/schema/pg.js
+index 691a5e1..cd99e40 100644
+--- a/server/vendor/kcc-lms/dist/schema/pg.js
++++ b/server/vendor/kcc-lms/dist/schema/pg.js
+@@ -241,8 +241,39 @@ export const quizzes = pgTable('lms_quizzes', {
+     passingScore: integer('passing_score').notNull().default(80),
+     /** Zero means unlimited. */
+     maxAttempts: integer('max_attempts').notNull().default(3),
++    /**
++     * How many questions to ask out of the bank, or null to ask all of them.
++     *
++     * Null is the old behaviour and the default, so every quiz that existed
++     * before this column did behaves exactly as it did. Set it and the quiz
++     * becomes a bank: each learner is dealt `drawSize` of its questions, so
++     * two people sitting the same quiz do not sit the same paper.
++     */
++    drawSize: integer('draw_size'),
+     ...timestamps,
+ }, (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)]);
++/**
++ * The hand a learner was dealt, kept because it has to outlive the request.
++ *
++ * A paper is fetched and submitted in two separate calls, and the attempt row
++ * does not exist until the second. If the draw were made fresh each time the
++ * paper was read, a refresh would deal a different hand, and the answers
++ * posted back would be marked against questions nobody was asked. So the draw
++ * is written when the paper is first handed out, reused while it is open, and
++ * stamped with `attemptId` when it is spent.
++ */
++export const quizDraws = pgTable('lms_quiz_draws', {
++    id: uuid('id').primaryKey().defaultRandom(),
++    quizId: uuid('quiz_id')
++        .notNull()
++        .references(() => quizzes.id, { onDelete: 'cascade' }),
++    userId: hostUserId('user_id'),
++    /** The drawn question ids, in the order they are to be asked. */
++    questionIds: jsonb('question_ids').$type().notNull().default([]),
++    drawnAt: timestamp('drawn_at', { withTimezone: true }).notNull().defaultNow(),
++    /** Null while the draw is open; set to the attempt that used it. */
++    attemptId: uuid('attempt_id').references(() => quizAttempts.id, { onDelete: 'cascade' }),
++}, (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)]);
+ export const quizQuestions = pgTable('lms_quiz_questions', {
+     id: uuid('id').primaryKey().defaultRandom(),
+     quizId: uuid('quiz_id')
+diff --git a/server/vendor/kcc-lms/dist/services/assessment.js b/server/vendor/kcc-lms/dist/services/assessment.js
+index 666fdef..6fa6b2d 100644
+--- a/server/vendor/kcc-lms/dist/services/assessment.js
++++ b/server/vendor/kcc-lms/dist/services/assessment.js
+@@ -25,12 +25,77 @@ async function quizWithCourse(context, quizId) {
+     return found;
+ }
+ /** The paper, as a learner gets it. */
++/**
++ * Pick `count` of `ids`, without replacement.
++ *
++ * A Fisher-Yates shuffle over a copy, stopping once enough have been taken.
++ * Deliberately not `sort(() => Math.random() - 0.5)`, which is the usual
++ * shortcut and is not a shuffle: comparison sorts assume a consistent
++ * comparator, and with a random one the result is biased towards the original
++ * order — which on a question bank means the same questions coming up far
++ * more often than the rest.
++ */
++function deal(ids, count, random) {
++    const pool = [...ids];
++    const take = Math.min(count, pool.length);
++    for (let i = 0; i < take; i += 1) {
++        const j = i + Math.floor(random() * (pool.length - i));
++        // Written out rather than destructured: under noUncheckedIndexedAccess a
++        // swap through index signatures is `string | undefined` on both sides.
++        const here = pool[i];
++        const there = pool[j];
++        pool[i] = there;
++        pool[j] = here;
++    }
++    return pool.slice(0, take);
++}
++/**
++ * The paper this learner is sitting, which is not always the whole quiz.
++ *
++ * With `drawSize` unset the quiz behaves as it always has: every question, in
++ * authoring order. With it set the quiz is a bank, and each learner is dealt
++ * that many of its questions.
++ *
++ * The draw is stored rather than made on the fly, because the paper is read
++ * in one request and answered in another. A draw made fresh each read would
++ * deal a new hand on every refresh, and the answers posted back would be
++ * marked against questions the learner was never shown. So: reuse the open
++ * draw if there is one, otherwise deal and write it down.
++ *
++ * Order is the draw's order, not the bank's, so two learners do not get the
++ * same questions in the same sequence either.
++ */
++async function dealtPaper(context, quiz) {
++    const all = await context.store.paperFor(quiz.id);
++    const size = quiz.drawSize;
++    // No bank, or a bank smaller than the hand asked for: ask everything, and
++    // do not write a draw for it — there is nothing to remember.
++    if (size === null || size <= 0 || size >= all.length)
++        return all;
++    const open = await context.store.openDrawFor(quiz.id, context.viewer.id);
++    let chosen = open?.questionIds ?? [];
++    // A draw can outlive the questions it names, if authoring removed one
++    // between the paper being dealt and it being sat. Treat a draw that no
++    // longer resolves as spent and deal again rather than serving a short paper.
++    const byId = new Map(all.map((question) => [question.id, question]));
++    if (chosen.length === 0 || chosen.some((id) => !byId.has(id))) {
++        chosen = deal(await context.store.questionIdsFor(quiz.id), size, context.random);
++        await context.store.insertDraw({
++            id: context.store.newId(),
++            quizId: quiz.id,
++            userId: context.viewer.id,
++            questionIds: chosen,
++            drawnAt: context.clock.now(),
++        });
++    }
++    return chosen.map((id) => byId.get(id)).filter((q) => q !== undefined);
++}
+ export async function getQuizPaper(context, lessonId) {
+     const quiz = await context.store.findQuizByLesson(lessonId);
+     if (!quiz)
+         return null;
+     await quizWithCourse(context, quiz.id);
+-    const questions = await context.store.paperFor(quiz.id);
++    const questions = await dealtPaper(context, quiz);
+     const attempts = await context.store.attemptsFor(quiz.id, context.viewer.id);
+     const attemptsTaken = attempts.length;
+     const bestScore = attempts.length === 0 ? null : Math.max(...attempts.map((a) => a.score));
+@@ -108,10 +173,31 @@ export async function submitAttempt(context, input) {
+     if (quiz.maxAttempts > 0 && attemptsTaken >= quiz.maxAttempts) {
+         throw new LmsConflict('You have used all your attempts at this quiz.');
+     }
+-    const questions = await context.store.scoringQuestions(quiz.id);
+-    if (questions.length === 0)
++    const whole = await context.store.scoringQuestions(quiz.id);
++    if (whole.length === 0)
+         throw new LmsInvalid('That quiz has no questions yet.');
+     const options = await context.store.scoringOptions(quiz.id);
++    /*
++     * Mark the paper they sat, not the bank it came from.
++     *
++     * On a quiz with a draw, scoring against every question would count the
++     * ones they were never shown as unanswered and wrong — a learner could
++     * answer all ten of their ten correctly and be told they scored thirty per
++     * cent. So the open draw decides the question set, and spending it below
++     * ties it to this attempt.
++     */
++    const draw = quiz.drawSize === null ? null : await context.store.openDrawFor(quiz.id, context.viewer.id);
++    const drawn = draw === null ? null : new Set(draw.questionIds);
++    const questions = drawn === null ? whole : whole.filter((question) => drawn.has(question.id));
++    // `whole` was checked non-empty above, and with no draw `questions` is
++    // `whole`, so reaching this means a draw whose questions have all gone —
++    // authoring replaced them while this learner was sitting the paper. Saying
++    // "no questions" would be a lie about the quiz and leave them with nothing
++    // to do; reloading the lesson deals a fresh hand (see dealtPaper), so say
++    // that instead.
++    if (questions.length === 0) {
++        throw new LmsInvalid('This quiz changed while you were taking it. Reload the lesson to be given a fresh set of questions.');
++    }
+     const marked = markAttempt({
+         questions,
+         options,
+@@ -128,6 +214,10 @@ export async function submitAttempt(context, input) {
+         answers: marked.clean,
+         submittedAt: context.clock.now(),
+     });
++    // Closed only after the attempt exists, so a failure above leaves the draw
++    // open and the learner sitting the same paper rather than a new one.
++    if (draw !== null)
++        await context.store.spendDraw(draw.id, attemptId);
+     const attemptsLeft = quiz.maxAttempts === 0 ? null : Math.max(0, quiz.maxAttempts - (attemptsTaken + 1));
+     emit(context, marked.passed
+         ? { kind: 'quiz.passed', userId: context.viewer.id, quizId: quiz.id, score: marked.score }
+diff --git a/server/vendor/kcc-lms/dist/services/authoring.js b/server/vendor/kcc-lms/dist/services/authoring.js
+index 3084a11..d6a03ab 100644
+--- a/server/vendor/kcc-lms/dist/services/authoring.js
++++ b/server/vendor/kcc-lms/dist/services/authoring.js
+@@ -280,6 +280,19 @@ export async function upsertQuiz(context, input) {
+     requireRole(context, 'instructor', 'write quizzes');
+     const passingScore = Math.min(100, Math.max(1, Math.round(input.passingScore ?? 80)));
+     const maxAttempts = Math.max(0, Math.round(input.maxAttempts ?? 3));
++    /*
++     * A draw of zero, or of more questions than the bank holds, is the same as
++     * no draw at all — so it is stored as none rather than as a number that
++     * silently means something else. Asking for more than exists is a mistake
++     * worth refusing rather than quietly rounding down, because the author
++     * thinks they have written more questions than they have.
++     */
++    const drawSize = input.drawSize === null || input.drawSize === undefined
++        ? null
++        : Math.max(0, Math.round(input.drawSize)) || null;
++    if (drawSize !== null && drawSize > input.questions.length) {
++        throw new LmsInvalid(`This quiz asks for ${drawSize} questions but only has ${input.questions.length}.`);
++    }
+     if (input.questions.length === 0)
+         throw new LmsInvalid('A quiz needs at least one question.');
+     for (const question of input.questions) {
+@@ -301,6 +314,7 @@ export async function upsertQuiz(context, input) {
+         instructions: input.instructions?.trim() || null,
+         passingScore,
+         maxAttempts,
++        drawSize,
+         questions: input.questions.map((question) => ({
+             id: context.store.newId(),
+             prompt: requireText(question.prompt, 'A question', 2, 1000),
+diff --git a/server/vendor/kcc-lms/dist/stores/drizzle.js b/server/vendor/kcc-lms/dist/stores/drizzle.js
+index 73ed97a..8a89ba7 100644
+--- a/server/vendor/kcc-lms/dist/stores/drizzle.js
++++ b/server/vendor/kcc-lms/dist/stores/drizzle.js
+@@ -12,7 +12,7 @@
+  * contract, and the probe suite runs this file against both engines. Spending
+  * the type safety here instead would buy less and cost more.
+  */
+-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
++import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+ import { likePattern } from '../like.js';
+ /**
+  * Rows from a raw `execute`, whichever driver is underneath.
+@@ -683,6 +683,7 @@ export function drizzleStore(input) {
+                 instructions: row.quiz.instructions ?? null,
+                 passingScore: asNumber(row.quiz.passingScore),
+                 maxAttempts: asNumber(row.quiz.maxAttempts),
++                drawSize: row.quiz.drawSize === null || row.quiz.drawSize === undefined ? null : asNumber(row.quiz.drawSize),
+                 courseId: row.courseId,
+                 lessonPublished: asBool(row.lessonPublished),
+             };
+@@ -698,8 +699,51 @@ export function drizzleStore(input) {
+                 instructions: row.instructions ?? null,
+                 passingScore: asNumber(row.passingScore),
+                 maxAttempts: asNumber(row.maxAttempts),
++                drawSize: row.drawSize === null || row.drawSize === undefined ? null : asNumber(row.drawSize),
+             };
+         },
++        async questionIdsFor(quizId) {
++            const rows = await db
++                .select({ id: t.quizQuestions.id })
++                .from(t.quizQuestions)
++                .where(eq(t.quizQuestions.quizId, quizId))
++                .orderBy(asc(t.quizQuestions.position), asc(t.quizQuestions.id));
++            return rows.map((row) => row.id);
++        },
++        async openDrawFor(quizId, userId) {
++            const [row] = await db
++                .select()
++                .from(t.quizDraws)
++                .where(and(eq(t.quizDraws.quizId, quizId), eq(t.quizDraws.userId, userId), isNull(t.quizDraws.attemptId)))
++                .orderBy(desc(t.quizDraws.drawnAt))
++                .limit(1);
++            if (!row)
++                return null;
++            return {
++                id: row.id,
++                quizId: row.quizId,
++                userId: String(row.userId),
++                // MySQL hands json back parsed; a string here would mean a driver
++                // that does not, and silently iterating its characters would deal a
++                // paper of single letters.
++                questionIds: Array.isArray(row.questionIds)
++                    ? row.questionIds
++                    : JSON.parse(String(row.questionIds ?? '[]')),
++                attemptId: row.attemptId ?? null,
++            };
++        },
++        async insertDraw(draw) {
++            await db.insert(t.quizDraws).values({
++                id: draw.id,
++                quizId: draw.quizId,
++                userId: draw.userId,
++                questionIds: draw.questionIds,
++                drawnAt: draw.drawnAt,
++            });
++        },
++        async spendDraw(drawId, attemptId) {
++            await db.update(t.quizDraws).set({ attemptId }).where(eq(t.quizDraws.id, drawId));
++        },
+         async paperFor(quizId) {
+             /*
+              * The select names its columns, and `isCorrect` is not among them.
+@@ -807,6 +851,7 @@ export function drizzleStore(input) {
+                     instructions: draft.instructions,
+                     passingScore: draft.passingScore,
+                     maxAttempts: draft.maxAttempts,
++                    drawSize: draft.drawSize ?? null,
+                     updatedAt: at,
+                 };
+                 if (existing[0]) {
+@@ -881,6 +926,7 @@ export function drizzleStore(input) {
+                 instructions: quiz.instructions ?? null,
+                 passingScore: asNumber(quiz.passingScore),
+                 maxAttempts: asNumber(quiz.maxAttempts),
++                drawSize: quiz.drawSize === null || quiz.drawSize === undefined ? null : asNumber(quiz.drawSize),
+                 questions: [...questions.values()],
+             };
+         },
+diff --git a/server/vendor/kcc-lms/dist/stores/index.js b/server/vendor/kcc-lms/dist/stores/index.js
+index 90946ac..e3a94be 100644
+--- a/server/vendor/kcc-lms/dist/stores/index.js
++++ b/server/vendor/kcc-lms/dist/stores/index.js
+@@ -26,6 +26,7 @@ const pgTables = {
+     quizQuestions: pg.quizQuestions,
+     quizOptions: pg.quizOptions,
+     quizAttempts: pg.quizAttempts,
++    quizDraws: pg.quizDraws,
+ };
+ const mysqlTables = {
+     cohorts: mysql.cohorts,
+@@ -40,6 +41,7 @@ const mysqlTables = {
+     quizQuestions: mysql.quizQuestions,
+     quizOptions: mysql.quizOptions,
+     quizAttempts: mysql.quizAttempts,
++    quizDraws: mysql.quizDraws,
+ };
+ /** A store over a Drizzle **PostgreSQL** handle. */
+ export function postgresStore(input) {
+diff --git a/server/vendor/kcc-lms/migrations/mysql/0002_question_banks.sql b/server/vendor/kcc-lms/migrations/mysql/0002_question_banks.sql
+new file mode 100644
+index 0000000..deeb27d
+--- /dev/null
++++ b/server/vendor/kcc-lms/migrations/mysql/0002_question_banks.sql
+@@ -0,0 +1,41 @@
++-- Question banks: ask some of a quiz's questions rather than all of them.
++--
++-- A quiz with `draw_size` set becomes a bank. Each learner is dealt that many
++-- of its questions, so two people sitting the same quiz do not sit the same
++-- paper. Null is the old behaviour and the default, so every quiz written
++-- before this migration behaves exactly as it did.
++--
++-- MySQL has no ADD COLUMN IF NOT EXISTS, so this is written to be run once.
++-- Re-running it errors on the duplicate column rather than corrupting
++-- anything.
++
++ALTER TABLE lms_quizzes ADD COLUMN draw_size int null;
++
++-- The hand a learner was dealt, kept because it has to outlive the request.
++--
++-- A paper is fetched and submitted in two separate calls and the attempt row
++-- does not exist until the second, so a draw made fresh on each read would
++-- deal a different hand on a refresh and mark answers against questions
++-- nobody was asked. The draw is written when the paper is first handed out,
++-- reused while it is open, and stamped with attempt_id once it is spent.
++--
++-- VENDORED SEAM — user_id is varchar(20), matching the three columns
++-- 0001_lms.sql already converted: this host's learners are `contacts`
++-- (int unsigned), not `users` (uuid), so there is no DB-level foreign key
++-- against them either. See VENDORED.md.
++--
++-- attempt_id carries no foreign key either. The PostgreSQL schema cascades
++-- it from lms_quiz_attempts; nothing in this app deletes an attempt, so the
++-- cascade has no path to fire, and it is set by the application in the same
++-- statement that writes the attempt.
++create table if not exists lms_quiz_draws (
++  id           char(36) not null,
++  quiz_id      char(36) not null,
++  user_id      varchar(20) not null,
++  question_ids json not null,
++  drawn_at     timestamp(3) not null default current_timestamp(3),
++  attempt_id   char(36) null,
++  primary key (id),
++  key lms_quiz_draws_open_idx (quiz_id, user_id, attempt_id),
++  constraint lms_quiz_draws_quiz_fk foreign key (quiz_id) references lms_quizzes (id) on delete cascade
++) engine = innodb default charset = utf8mb4;
+diff --git a/server/vendor/kcc-lms/migrations/postgres/0002_question_banks.sql b/server/vendor/kcc-lms/migrations/postgres/0002_question_banks.sql
+new file mode 100644
+index 0000000..d289588
+--- /dev/null
++++ b/server/vendor/kcc-lms/migrations/postgres/0002_question_banks.sql
+@@ -0,0 +1,29 @@
++-- Question banks: ask some of a quiz's questions rather than all of them.
++--
++-- A quiz with `draw_size` set becomes a bank. Each learner is dealt that many
++-- of its questions, so two people sitting the same quiz do not sit the same
++-- paper. Null is the old behaviour and the default, so every quiz written
++-- before this migration behaves exactly as it did.
++
++ALTER TABLE lms_quizzes ADD COLUMN IF NOT EXISTS draw_size integer;
++
++-- The hand a learner was dealt, kept because it has to outlive the request.
++--
++-- A paper is fetched and submitted in two separate calls and the attempt row
++-- does not exist until the second, so a draw made fresh on each read would
++-- deal a different hand on a refresh and mark answers against questions
++-- nobody was asked. The draw is written when the paper is first handed out,
++-- reused while it is open, and stamped with attempt_id once it is spent.
++CREATE TABLE IF NOT EXISTS lms_quiz_draws (
++  id           uuid primary key default gen_random_uuid(),
++  quiz_id      uuid not null references lms_quizzes (id) on delete cascade,
++  user_id      uuid not null,
++  question_ids jsonb not null default '[]'::jsonb,
++  drawn_at     timestamptz not null default now(),
++  attempt_id   uuid references lms_quiz_attempts (id) on delete cascade
++);
++
++-- One lookup this table exists to serve: the open draw for this learner on
++-- this quiz. attempt_id is in the key because "open" means it is null.
++CREATE INDEX IF NOT EXISTS lms_quiz_draws_open_idx
++  ON lms_quiz_draws (quiz_id, user_id, attempt_id);
+diff --git a/server/vendor/kcc-lms/src/context.ts b/server/vendor/kcc-lms/src/context.ts
+index 5d5734f..0148bf8 100644
+--- a/server/vendor/kcc-lms/src/context.ts
++++ b/server/vendor/kcc-lms/src/context.ts
+@@ -14,6 +14,8 @@ export type LmsContext = {
+   viewer: Viewer;
+   ports: LmsPorts;
+   clock: ClockPort;
++  /** [0, 1), replaceable so a dealt paper can be asserted. */
++  random: () => number;
+ };
+ 
+ /**
+@@ -30,6 +32,7 @@ export function lmsContext(input: { store: Store; viewer: Viewer; ports?: LmsPor
+     viewer: input.viewer,
+     ports,
+     clock: ports.clock ?? systemClock,
++    random: ports.random ?? Math.random,
+   };
+ }
+ 
+diff --git a/server/vendor/kcc-lms/src/ports.ts b/server/vendor/kcc-lms/src/ports.ts
+index 1ef4ddb..f40cc37 100644
+--- a/server/vendor/kcc-lms/src/ports.ts
++++ b/server/vendor/kcc-lms/src/ports.ts
+@@ -135,4 +135,12 @@ export type LmsPorts = {
+   video?: VideoPort;
+   notifier?: NotifierPort;
+   clock?: ClockPort;
++  /**
++   * Where randomness comes from, for the same reason `clock` exists.
++   *
++   * A question bank deals a different paper every time by design, which is
++   * untestable unless the source can be replaced. Returns a number in
++   * [0, 1), like `Math.random`, and defaults to it.
++   */
++  random?: () => number;
+ };
+diff --git a/server/vendor/kcc-lms/src/schema/mysql.ts b/server/vendor/kcc-lms/src/schema/mysql.ts
+index b995256..a65cc08 100644
+--- a/server/vendor/kcc-lms/src/schema/mysql.ts
++++ b/server/vendor/kcc-lms/src/schema/mysql.ts
+@@ -54,13 +54,8 @@ import {
+   varchar,
+ } from 'drizzle-orm/mysql-core';
+ 
+-/**
+- * See the note of the same name in `./pg.ts`. The seam is identical, except
+- * that this copy is wired to Kingdom Connections' `contacts` table (church
+- * members) rather than `users` (internal staff) — see the header note in
+- * `migrations/mysql/0001_lms.sql`.
+- */
+-export const HOST_USERS_TABLE = 'contacts';
++/** See the note of the same name in `./pg.ts`. The seam is identical. */
++export const HOST_USERS_TABLE = 'users';
+ 
+ /**
+  * Timestamps.
+@@ -82,10 +77,9 @@ const timestamps = {
+ 
+ const id = () => char('id', { length: 36 }).primaryKey();
+ const ref = (column: string) => char(column, { length: 36 }).notNull();
+-
+-// Kingdom Connections wiring: these three columns hold a `contacts.id`
+-// (int unsigned, so a short numeric string fits easily), not a 36-char
+-// UUID. See migrations/mysql/0001_lms.sql for why there is no DB-level FK.
++// VENDORED SEAM — see VENDORED.md. Kingdom Connections' learners are
++// `contacts` (int unsigned), not `users` (uuid), so every column that
++// references a learner is varchar(20) and carries no DB-level foreign key.
+ const userRef = (column: string) => varchar(column, { length: 20 }).notNull();
+ 
+ /* --------------------------------------------------------------- cohorts */
+@@ -138,7 +132,7 @@ export const courses = mysqlTable(
+     outcomes: json('outcomes').$type<string[]>().notNull(),
+     prerequisites: json('prerequisites').$type<string[]>().notNull(),
+     topics: json('topics').$type<string[]>().notNull(),
+-    createdBy: varchar('created_by', { length: 20 }),
++    createdBy: char('created_by', { length: 36 }),
+     ...timestamps,
+   },
+   (t) => [
+@@ -250,11 +244,45 @@ export const quizzes = mysqlTable(
+     instructions: text('instructions'),
+     passingScore: int('passing_score').notNull().default(80),
+     maxAttempts: int('max_attempts').notNull().default(3),
++    /**
++     * How many questions to ask out of the bank, or null to ask all of them.
++     *
++     * Null is the old behaviour and the default, so every quiz that existed
++     * before this column did behaves exactly as it did. Set it and the quiz
++     * becomes a bank: each learner is dealt `drawSize` of its questions, so
++     * two people sitting the same quiz do not sit the same paper.
++     */
++    drawSize: int('draw_size'),
+     ...timestamps,
+   },
+   (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)],
+ );
+ 
++/**
++ * The hand a learner was dealt, kept because it has to outlive the request.
++ *
++ * A paper is fetched and submitted in two separate calls, and the attempt row
++ * does not exist until the second. If the draw were made fresh each time the
++ * paper was read, a refresh would deal a different hand, and the answers
++ * posted back would be marked against questions nobody was asked. So the draw
++ * is written when the paper is first handed out, reused while it is open, and
++ * stamped with `attemptId` when it is spent.
++ */
++export const quizDraws = mysqlTable(
++  'lms_quiz_draws',
++  {
++    id: id(),
++    quizId: ref('quiz_id'),
++    userId: userRef('user_id'),
++    /** The drawn question ids, in the order they are to be asked. */
++    questionIds: json('question_ids').$type<string[]>().notNull(),
++    drawnAt: timestamp('drawn_at', { fsp: 3 }).notNull().defaultNow(),
++    /** Null while the draw is open; set to the attempt that used it. */
++    attemptId: char('attempt_id', { length: 36 }),
++  },
++  (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)],
++);
++
+ export const quizQuestions = mysqlTable(
+   'lms_quiz_questions',
+   {
+diff --git a/server/vendor/kcc-lms/src/schema/pg.ts b/server/vendor/kcc-lms/src/schema/pg.ts
+index c4336c8..497c178 100644
+--- a/server/vendor/kcc-lms/src/schema/pg.ts
++++ b/server/vendor/kcc-lms/src/schema/pg.ts
+@@ -308,11 +308,47 @@ export const quizzes = pgTable(
+     passingScore: integer('passing_score').notNull().default(80),
+     /** Zero means unlimited. */
+     maxAttempts: integer('max_attempts').notNull().default(3),
++    /**
++     * How many questions to ask out of the bank, or null to ask all of them.
++     *
++     * Null is the old behaviour and the default, so every quiz that existed
++     * before this column did behaves exactly as it did. Set it and the quiz
++     * becomes a bank: each learner is dealt `drawSize` of its questions, so
++     * two people sitting the same quiz do not sit the same paper.
++     */
++    drawSize: integer('draw_size'),
+     ...timestamps,
+   },
+   (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)],
+ );
+ 
++/**
++ * The hand a learner was dealt, kept because it has to outlive the request.
++ *
++ * A paper is fetched and submitted in two separate calls, and the attempt row
++ * does not exist until the second. If the draw were made fresh each time the
++ * paper was read, a refresh would deal a different hand, and the answers
++ * posted back would be marked against questions nobody was asked. So the draw
++ * is written when the paper is first handed out, reused while it is open, and
++ * stamped with `attemptId` when it is spent.
++ */
++export const quizDraws = pgTable(
++  'lms_quiz_draws',
++  {
++    id: uuid('id').primaryKey().defaultRandom(),
++    quizId: uuid('quiz_id')
++      .notNull()
++      .references(() => quizzes.id, { onDelete: 'cascade' }),
++    userId: hostUserId('user_id'),
++    /** The drawn question ids, in the order they are to be asked. */
++    questionIds: jsonb('question_ids').$type<string[]>().notNull().default([]),
++    drawnAt: timestamp('drawn_at', { withTimezone: true }).notNull().defaultNow(),
++    /** Null while the draw is open; set to the attempt that used it. */
++    attemptId: uuid('attempt_id').references(() => quizAttempts.id, { onDelete: 'cascade' }),
++  },
++  (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)],
++);
++
+ export const quizQuestions = pgTable(
+   'lms_quiz_questions',
+   {
+diff --git a/server/vendor/kcc-lms/src/services/assessment.ts b/server/vendor/kcc-lms/src/services/assessment.ts
+index 00ee2e9..5511f3c 100644
+--- a/server/vendor/kcc-lms/src/services/assessment.ts
++++ b/server/vendor/kcc-lms/src/services/assessment.ts
+@@ -15,7 +15,7 @@ import { hasAtLeast } from '../ports.js';
+ import { LmsConflict, LmsForbidden, LmsInvalid, LmsNotFound } from '../errors.js';
+ import { emit, type LmsContext } from '../context.js';
+ import { requireEntitlement } from './enrolment.js';
+-import type { AttemptRow, PaperQuestion, ScoringOption, ScoringQuestion } from '../store.js';
++import type { AttemptRow, PaperQuestion, QuizRow, ScoringOption, ScoringQuestion } from '../store.js';
+ 
+ export type QuizPaper = {
+   id: string;
+@@ -41,13 +41,86 @@ async function quizWithCourse(context: LmsContext, quizId: string) {
+ }
+ 
+ /** The paper, as a learner gets it. */
++/**
++ * Pick `count` of `ids`, without replacement.
++ *
++ * A Fisher-Yates shuffle over a copy, stopping once enough have been taken.
++ * Deliberately not `sort(() => Math.random() - 0.5)`, which is the usual
++ * shortcut and is not a shuffle: comparison sorts assume a consistent
++ * comparator, and with a random one the result is biased towards the original
++ * order — which on a question bank means the same questions coming up far
++ * more often than the rest.
++ */
++function deal(ids: string[], count: number, random: () => number): string[] {
++  const pool = [...ids];
++  const take = Math.min(count, pool.length);
++  for (let i = 0; i < take; i += 1) {
++    const j = i + Math.floor(random() * (pool.length - i));
++    // Written out rather than destructured: under noUncheckedIndexedAccess a
++    // swap through index signatures is `string | undefined` on both sides.
++    const here = pool[i] as string;
++    const there = pool[j] as string;
++    pool[i] = there;
++    pool[j] = here;
++  }
++  return pool.slice(0, take);
++}
++
++/**
++ * The paper this learner is sitting, which is not always the whole quiz.
++ *
++ * With `drawSize` unset the quiz behaves as it always has: every question, in
++ * authoring order. With it set the quiz is a bank, and each learner is dealt
++ * that many of its questions.
++ *
++ * The draw is stored rather than made on the fly, because the paper is read
++ * in one request and answered in another. A draw made fresh each read would
++ * deal a new hand on every refresh, and the answers posted back would be
++ * marked against questions the learner was never shown. So: reuse the open
++ * draw if there is one, otherwise deal and write it down.
++ *
++ * Order is the draw's order, not the bank's, so two learners do not get the
++ * same questions in the same sequence either.
++ */
++async function dealtPaper(context: LmsContext, quiz: QuizRow): Promise<PaperQuestion[]> {
++  const all = await context.store.paperFor(quiz.id);
++  const size = quiz.drawSize;
++  // No bank, or a bank smaller than the hand asked for: ask everything, and
++  // do not write a draw for it — there is nothing to remember.
++  if (size === null || size <= 0 || size >= all.length) return all;
++
++  const open = await context.store.openDrawFor(quiz.id, context.viewer.id);
++  let chosen = open?.questionIds ?? [];
++
++  // A draw can outlive the questions it names, if authoring removed one
++  // between the paper being dealt and it being sat. Treat a draw that no
++  // longer resolves as spent and deal again rather than serving a short paper.
++  const byId = new Map(all.map((question) => [question.id, question]));
++  if (chosen.length === 0 || chosen.some((id) => !byId.has(id))) {
++    chosen = deal(
++      await context.store.questionIdsFor(quiz.id),
++      size,
++      context.random,
++    );
++    await context.store.insertDraw({
++      id: context.store.newId(),
++      quizId: quiz.id,
++      userId: context.viewer.id,
++      questionIds: chosen,
++      drawnAt: context.clock.now(),
++    });
++  }
++
++  return chosen.map((id) => byId.get(id)).filter((q): q is PaperQuestion => q !== undefined);
++}
++
+ export async function getQuizPaper(context: LmsContext, lessonId: string): Promise<QuizPaper | null> {
+   const quiz = await context.store.findQuizByLesson(lessonId);
+   if (!quiz) return null;
+ 
+   await quizWithCourse(context, quiz.id);
+ 
+-  const questions = await context.store.paperFor(quiz.id);
++  const questions = await dealtPaper(context, quiz);
+   const attempts = await context.store.attemptsFor(quiz.id, context.viewer.id);
+ 
+   const attemptsTaken = attempts.length;
+@@ -157,10 +230,34 @@ export async function submitAttempt(
+     throw new LmsConflict('You have used all your attempts at this quiz.');
+   }
+ 
+-  const questions = await context.store.scoringQuestions(quiz.id);
+-  if (questions.length === 0) throw new LmsInvalid('That quiz has no questions yet.');
++  const whole = await context.store.scoringQuestions(quiz.id);
++  if (whole.length === 0) throw new LmsInvalid('That quiz has no questions yet.');
+   const options = await context.store.scoringOptions(quiz.id);
+ 
++  /*
++   * Mark the paper they sat, not the bank it came from.
++   *
++   * On a quiz with a draw, scoring against every question would count the
++   * ones they were never shown as unanswered and wrong — a learner could
++   * answer all ten of their ten correctly and be told they scored thirty per
++   * cent. So the open draw decides the question set, and spending it below
++   * ties it to this attempt.
++   */
++  const draw = quiz.drawSize === null ? null : await context.store.openDrawFor(quiz.id, context.viewer.id);
++  const drawn = draw === null ? null : new Set(draw.questionIds);
++  const questions = drawn === null ? whole : whole.filter((question) => drawn.has(question.id));
++  // `whole` was checked non-empty above, and with no draw `questions` is
++  // `whole`, so reaching this means a draw whose questions have all gone —
++  // authoring replaced them while this learner was sitting the paper. Saying
++  // "no questions" would be a lie about the quiz and leave them with nothing
++  // to do; reloading the lesson deals a fresh hand (see dealtPaper), so say
++  // that instead.
++  if (questions.length === 0) {
++    throw new LmsInvalid(
++      'This quiz changed while you were taking it. Reload the lesson to be given a fresh set of questions.',
++    );
++  }
++
+   const marked = markAttempt({
+     questions,
+     options,
+@@ -179,6 +276,10 @@ export async function submitAttempt(
+     submittedAt: context.clock.now(),
+   });
+ 
++  // Closed only after the attempt exists, so a failure above leaves the draw
++  // open and the learner sitting the same paper rather than a new one.
++  if (draw !== null) await context.store.spendDraw(draw.id, attemptId);
++
+   const attemptsLeft = quiz.maxAttempts === 0 ? null : Math.max(0, quiz.maxAttempts - (attemptsTaken + 1));
+ 
+   emit(
+diff --git a/server/vendor/kcc-lms/src/services/authoring.ts b/server/vendor/kcc-lms/src/services/authoring.ts
+index a7d8bc9..f3237c0 100644
+--- a/server/vendor/kcc-lms/src/services/authoring.ts
++++ b/server/vendor/kcc-lms/src/services/authoring.ts
+@@ -352,6 +352,8 @@ export async function upsertQuiz(
+     instructions?: string | null;
+     passingScore?: number;
+     maxAttempts?: number;
++    /** Ask this many of the questions rather than all of them. */
++    drawSize?: number | null;
+     questions: {
+       prompt: string;
+       explanation?: string | null;
+@@ -364,6 +366,23 @@ export async function upsertQuiz(
+   const passingScore = Math.min(100, Math.max(1, Math.round(input.passingScore ?? 80)));
+   const maxAttempts = Math.max(0, Math.round(input.maxAttempts ?? 3));
+ 
++  /*
++   * A draw of zero, or of more questions than the bank holds, is the same as
++   * no draw at all — so it is stored as none rather than as a number that
++   * silently means something else. Asking for more than exists is a mistake
++   * worth refusing rather than quietly rounding down, because the author
++   * thinks they have written more questions than they have.
++   */
++  const drawSize =
++    input.drawSize === null || input.drawSize === undefined
++      ? null
++      : Math.max(0, Math.round(input.drawSize)) || null;
++  if (drawSize !== null && drawSize > input.questions.length) {
++    throw new LmsInvalid(
++      `This quiz asks for ${drawSize} questions but only has ${input.questions.length}.`,
++    );
++  }
++
+   if (input.questions.length === 0) throw new LmsInvalid('A quiz needs at least one question.');
+   for (const question of input.questions) {
+     if (question.options.length < 2) throw new LmsInvalid('Each question needs at least two options.');
+@@ -383,6 +402,7 @@ export async function upsertQuiz(
+     instructions: input.instructions?.trim() || null,
+     passingScore,
+     maxAttempts,
++    drawSize,
+     questions: input.questions.map((question) => ({
+       id: context.store.newId(),
+       prompt: requireText(question.prompt, 'A question', 2, 1000),
+diff --git a/server/vendor/kcc-lms/src/store.ts b/server/vendor/kcc-lms/src/store.ts
+index f315103..a0dfed8 100644
+--- a/server/vendor/kcc-lms/src/store.ts
++++ b/server/vendor/kcc-lms/src/store.ts
+@@ -144,6 +144,22 @@ export type QuizRow = {
+   instructions: string | null;
+   passingScore: number;
+   maxAttempts: number;
++  /** How many of the bank's questions to ask, or null to ask all of them. */
++  drawSize: number | null;
++};
++
++/**
++ * The questions one learner was dealt for one sitting.
++ *
++ * Open while `attemptId` is null, spent once it is set. A learner has at most
++ * one open draw per quiz: the paper they are looking at right now.
++ */
++export type DrawRow = {
++  id: string;
++  quizId: string;
++  userId: string;
++  questionIds: string[];
++  attemptId: string | null;
+ };
+ 
+ /** A question with its options, and deliberately no correctness. */
+@@ -238,6 +254,8 @@ export type QuizDraft = {
+   instructions: string | null;
+   passingScore: number;
+   maxAttempts: number;
++  /** How many of the questions to ask, or null to ask all of them. */
++  drawSize?: number | null;
+   questions: {
+     id: string;
+     prompt: string;
+@@ -348,6 +366,19 @@ export type Store = {
+   findQuizByLesson(lessonId: string): Promise<QuizRow | null>;
+   /** The paper, with no correctness in it. */
+   paperFor(quizId: string): Promise<PaperQuestion[]>;
++  /** Every question id on a quiz, in asking order — the bank to draw from. */
++  questionIdsFor(quizId: string): Promise<string[]>;
++  /** The learner's open draw for this quiz, if they have one. */
++  openDrawFor(quizId: string, userId: string): Promise<DrawRow | null>;
++  insertDraw(draw: {
++    id: string;
++    quizId: string;
++    userId: string;
++    questionIds: string[];
++    drawnAt: Date;
++  }): Promise<void>;
++  /** Ties an open draw to the attempt that used it, closing it. */
++  spendDraw(drawId: string, attemptId: string): Promise<void>;
+   scoringQuestions(quizId: string): Promise<ScoringQuestion[]>;
+   scoringOptions(quizId: string): Promise<ScoringOption[]>;
+   attemptsFor(quizId: string, userId: string): Promise<AttemptRow[]>;
+diff --git a/server/vendor/kcc-lms/src/stores/drizzle.ts b/server/vendor/kcc-lms/src/stores/drizzle.ts
+index a2a34fd..6f4efa8 100644
+--- a/server/vendor/kcc-lms/src/stores/drizzle.ts
++++ b/server/vendor/kcc-lms/src/stores/drizzle.ts
+@@ -12,8 +12,9 @@
+  * contract, and the probe suite runs this file against both engines. Spending
+  * the type safety here instead would buy less and cost more.
+  */
+-import { and, asc, eq, inArray, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
++import { and, asc, desc, eq, inArray, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
+ import type {
++  DrawRow,
+   AttachmentRow,
+   AttemptRow,
+   CatalogueQuery,
+@@ -55,6 +56,7 @@ export type LmsTables = {
+   quizQuestions: any;
+   quizOptions: any;
+   quizAttempts: any;
++  quizDraws: any;
+ };
+ 
+ export type DrizzleStoreInput = {
+@@ -830,6 +832,7 @@ export function drizzleStore(input: DrizzleStoreInput): Store {
+         instructions: row.quiz.instructions ?? null,
+         passingScore: asNumber(row.quiz.passingScore),
+         maxAttempts: asNumber(row.quiz.maxAttempts),
++        drawSize: row.quiz.drawSize === null || row.quiz.drawSize === undefined ? null : asNumber(row.quiz.drawSize),
+         courseId: row.courseId,
+         lessonPublished: asBool(row.lessonPublished),
+       };
+@@ -845,9 +848,61 @@ export function drizzleStore(input: DrizzleStoreInput): Store {
+         instructions: row.instructions ?? null,
+         passingScore: asNumber(row.passingScore),
+         maxAttempts: asNumber(row.maxAttempts),
++        drawSize: row.drawSize === null || row.drawSize === undefined ? null : asNumber(row.drawSize),
+       };
+     },
+ 
++    async questionIdsFor(quizId): Promise<string[]> {
++      const rows = await db
++        .select({ id: t.quizQuestions.id })
++        .from(t.quizQuestions)
++        .where(eq(t.quizQuestions.quizId, quizId))
++        .orderBy(asc(t.quizQuestions.position), asc(t.quizQuestions.id));
++      return rows.map((row: { id: string }) => row.id);
++    },
++
++    async openDrawFor(quizId, userId): Promise<DrawRow | null> {
++      const [row] = await db
++        .select()
++        .from(t.quizDraws)
++        .where(
++          and(
++            eq(t.quizDraws.quizId, quizId),
++            eq(t.quizDraws.userId, userId),
++            isNull(t.quizDraws.attemptId),
++          ),
++        )
++        .orderBy(desc(t.quizDraws.drawnAt))
++        .limit(1);
++      if (!row) return null;
++      return {
++        id: row.id,
++        quizId: row.quizId,
++        userId: String(row.userId),
++        // MySQL hands json back parsed; a string here would mean a driver
++        // that does not, and silently iterating its characters would deal a
++        // paper of single letters.
++        questionIds: Array.isArray(row.questionIds)
++          ? row.questionIds
++          : (JSON.parse(String(row.questionIds ?? '[]')) as string[]),
++        attemptId: row.attemptId ?? null,
++      };
++    },
++
++    async insertDraw(draw): Promise<void> {
++      await db.insert(t.quizDraws).values({
++        id: draw.id,
++        quizId: draw.quizId,
++        userId: draw.userId,
++        questionIds: draw.questionIds,
++        drawnAt: draw.drawnAt,
++      } as typeof t.quizDraws.$inferInsert);
++    },
++
++    async spendDraw(drawId, attemptId): Promise<void> {
++      await db.update(t.quizDraws).set({ attemptId }).where(eq(t.quizDraws.id, drawId));
++    },
++
+     async paperFor(quizId): Promise<PaperQuestion[]> {
+       /*
+        * The select names its columns, and `isCorrect` is not among them.
+@@ -968,6 +1023,7 @@ export function drizzleStore(input: DrizzleStoreInput): Store {
+           instructions: draft.instructions,
+           passingScore: draft.passingScore,
+           maxAttempts: draft.maxAttempts,
++          drawSize: draft.drawSize ?? null,
+           updatedAt: at,
+         };
+ 
+@@ -1055,6 +1111,7 @@ export function drizzleStore(input: DrizzleStoreInput): Store {
+         instructions: quiz.instructions ?? null,
+         passingScore: asNumber(quiz.passingScore),
+         maxAttempts: asNumber(quiz.maxAttempts),
++        drawSize: quiz.drawSize === null || quiz.drawSize === undefined ? null : asNumber(quiz.drawSize),
+         questions: [...questions.values()],
+       };
+     },
+diff --git a/server/vendor/kcc-lms/src/stores/index.ts b/server/vendor/kcc-lms/src/stores/index.ts
+index 2e66e66..03322a3 100644
+--- a/server/vendor/kcc-lms/src/stores/index.ts
++++ b/server/vendor/kcc-lms/src/stores/index.ts
+@@ -29,6 +29,7 @@ const pgTables: LmsTables = {
+   quizQuestions: pg.quizQuestions,
+   quizOptions: pg.quizOptions,
+   quizAttempts: pg.quizAttempts,
++  quizDraws: pg.quizDraws,
+ };
+ 
+ const mysqlTables: LmsTables = {
+@@ -44,6 +45,7 @@ const mysqlTables: LmsTables = {
+   quizQuestions: mysql.quizQuestions,
+   quizOptions: mysql.quizOptions,
+   quizAttempts: mysql.quizAttempts,
++  quizDraws: mysql.quizDraws,
+ };
+ 
+ /** A store over a Drizzle **PostgreSQL** handle. */

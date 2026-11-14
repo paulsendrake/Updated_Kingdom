@@ -32,7 +32,7 @@ function blankLesson(moduleId) {
 }
 function blankQuiz(lessonId) {
   return {
-    lessonId, title: '', instructions: '', passingScore: 80, maxAttempts: 3,
+    lessonId, title: '', instructions: '', passingScore: 80, maxAttempts: 3, drawSize: '',
     questions: [{ prompt: '', explanation: '', options: [{ label: '', isCorrect: true }, { label: '', isCorrect: false }] }],
   };
 }
@@ -209,6 +209,7 @@ export default function LmsCourseEditorPage() {
         id: data.id, lessonId: lesson.id,
         title: data.title, instructions: data.instructions || '',
         passingScore: data.passingScore, maxAttempts: data.maxAttempts,
+        drawSize: data.drawSize === null || data.drawSize === undefined ? '' : String(data.drawSize),
         questions: data.questions.map((q) => ({
           prompt: q.prompt, explanation: q.explanation || '',
           options: q.options.map((o) => ({ label: o.label, isCorrect: o.isCorrect })),
@@ -267,12 +268,24 @@ export default function LmsCourseEditorPage() {
       if (!q.prompt.trim()) { setQuizError('Every question needs a prompt.'); return; }
       if (q.options.some((o) => !o.label.trim())) { setQuizError('Every option needs text.'); return; }
     }
+    // Blank or 0 means "ask every question"; anything else must fit the bank.
+    const drawText = String(quizForm.drawSize ?? '').trim();
+    const drawSize = drawText === '' ? null : Number(drawText);
+    if (drawSize !== null && (!Number.isInteger(drawSize) || drawSize < 0)) {
+      setQuizError('Questions per attempt must be a whole number, or blank to ask every question.');
+      return;
+    }
+    if (drawSize !== null && drawSize > quizForm.questions.length) {
+      setQuizError(`This quiz asks for ${drawSize} questions but only has ${quizForm.questions.length}.`);
+      return;
+    }
     try {
       await api.put(`/lms/lessons/${quizForm.lessonId}/quiz`, {
         title: quizForm.title.trim(),
         instructions: quizForm.instructions.trim() || null,
         passingScore: Number(quizForm.passingScore),
         maxAttempts: Number(quizForm.maxAttempts),
+        drawSize,
         questions: quizForm.questions,
       });
       setQuizShow(false);
@@ -587,13 +600,31 @@ export default function LmsCourseEditorPage() {
                   <label className="form-label">Instructions</label>
                   <textarea className="form-control" rows="2" value={quizForm.instructions} onChange={(e) => setQuizForm({ ...quizForm, instructions: e.target.value })} />
                 </div>
-                <div className="col-md-6">
+                <div className="col-md-4">
                   <label className="form-label">Passing Score (%)</label>
                   <input type="number" min="1" max="100" className="form-control" value={quizForm.passingScore} onChange={(e) => setQuizForm({ ...quizForm, passingScore: e.target.value })} />
                 </div>
-                <div className="col-md-6">
+                <div className="col-md-4">
                   <label className="form-label">Max Attempts <span className="text-muted small">(0 = unlimited)</span></label>
                   <input type="number" min="0" className="form-control" value={quizForm.maxAttempts} onChange={(e) => setQuizForm({ ...quizForm, maxAttempts: e.target.value })} />
+                </div>
+                <div className="col-md-4">
+                  <label className="form-label">Questions Per Attempt</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={quizForm.questions.length}
+                    className="form-control"
+                    placeholder={`All ${quizForm.questions.length}`}
+                    value={quizForm.drawSize}
+                    onChange={(e) => setQuizForm({ ...quizForm, drawSize: e.target.value })}
+                  />
+                  <div className="form-text">
+                    Leave blank to ask every question. Enter a smaller number and the
+                    quiz becomes a bank: each sitting draws that many of the{' '}
+                    {quizForm.questions.length} at random, in a random order. A draw is
+                    fresh each sitting, so it may repeat some of the same questions.
+                  </div>
                 </div>
               </div>
 

@@ -135,4 +135,12 @@ export type LmsPorts = {
   video?: VideoPort;
   notifier?: NotifierPort;
   clock?: ClockPort;
+  /**
+   * Where randomness comes from, for the same reason `clock` exists.
+   *
+   * A question bank deals a different paper every time by design, which is
+   * untestable unless the source can be replaced. Returns a number in
+   * [0, 1), like `Math.random`, and defaults to it.
+   */
+  random?: () => number;
 };

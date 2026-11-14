@@ -40,13 +40,8 @@
  * case-sensitive search, and that is worth knowing before they wonder why.
  */
 import { boolean, char, index, int, json, mysqlEnum, mysqlTable, primaryKey, text, timestamp, uniqueIndex, varchar, } from 'drizzle-orm/mysql-core';
-/**
- * See the note of the same name in `./pg.ts`. The seam is identical, except
- * that this copy is wired to Kingdom Connections' `contacts` table (church
- * members) rather than `users` (internal staff) — see the header note in
- * `migrations/mysql/0001_lms.sql`.
- */
-export const HOST_USERS_TABLE = 'contacts';
+/** See the note of the same name in `./pg.ts`. The seam is identical. */
+export const HOST_USERS_TABLE = 'users';
 /**
  * Timestamps.
  *
@@ -66,9 +61,9 @@ const timestamps = {
 };
 const id = () => char('id', { length: 36 }).primaryKey();
 const ref = (column) => char(column, { length: 36 }).notNull();
-// Kingdom Connections wiring: these three columns hold a `contacts.id`
-// (int unsigned, so a short numeric string fits easily), not a 36-char
-// UUID. See migrations/mysql/0001_lms.sql for why there is no DB-level FK.
+// VENDORED SEAM — see VENDORED.md. Kingdom Connections' learners are
+// `contacts` (int unsigned), not `users` (uuid), so every column that
+// references a learner is varchar(20) and carries no DB-level foreign key.
 const userRef = (column) => varchar(column, { length: 20 }).notNull();
 /* --------------------------------------------------------------- cohorts */
 export const cohorts = mysqlTable('lms_cohorts', {
@@ -106,7 +101,7 @@ export const courses = mysqlTable('lms_courses', {
     outcomes: json('outcomes').$type().notNull(),
     prerequisites: json('prerequisites').$type().notNull(),
     topics: json('topics').$type().notNull(),
-    createdBy: varchar('created_by', { length: 20 }),
+    createdBy: char('created_by', { length: 36 }),
     ...timestamps,
 }, (t) => [
     uniqueIndex('lms_courses_slug_key').on(t.slug),
@@ -186,8 +181,37 @@ export const quizzes = mysqlTable('lms_quizzes', {
     instructions: text('instructions'),
     passingScore: int('passing_score').notNull().default(80),
     maxAttempts: int('max_attempts').notNull().default(3),
+    /**
+     * How many questions to ask out of the bank, or null to ask all of them.
+     *
+     * Null is the old behaviour and the default, so every quiz that existed
+     * before this column did behaves exactly as it did. Set it and the quiz
+     * becomes a bank: each learner is dealt `drawSize` of its questions, so
+     * two people sitting the same quiz do not sit the same paper.
+     */
+    drawSize: int('draw_size'),
     ...timestamps,
 }, (t) => [uniqueIndex('lms_quizzes_lesson_key').on(t.lessonId)]);
+/**
+ * The hand a learner was dealt, kept because it has to outlive the request.
+ *
+ * A paper is fetched and submitted in two separate calls, and the attempt row
+ * does not exist until the second. If the draw were made fresh each time the
+ * paper was read, a refresh would deal a different hand, and the answers
+ * posted back would be marked against questions nobody was asked. So the draw
+ * is written when the paper is first handed out, reused while it is open, and
+ * stamped with `attemptId` when it is spent.
+ */
+export const quizDraws = mysqlTable('lms_quiz_draws', {
+    id: id(),
+    quizId: ref('quiz_id'),
+    userId: userRef('user_id'),
+    /** The drawn question ids, in the order they are to be asked. */
+    questionIds: json('question_ids').$type().notNull(),
+    drawnAt: timestamp('drawn_at', { fsp: 3 }).notNull().defaultNow(),
+    /** Null while the draw is open; set to the attempt that used it. */
+    attemptId: char('attempt_id', { length: 36 }),
+}, (t) => [index('lms_quiz_draws_open_idx').on(t.quizId, t.userId, t.attemptId)]);
 export const quizQuestions = mysqlTable('lms_quiz_questions', {
     id: id(),
     quizId: ref('quiz_id'),

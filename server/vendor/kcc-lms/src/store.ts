@@ -144,6 +144,22 @@ export type QuizRow = {
   instructions: string | null;
   passingScore: number;
   maxAttempts: number;
+  /** How many of the bank's questions to ask, or null to ask all of them. */
+  drawSize: number | null;
+};
+
+/**
+ * The questions one learner was dealt for one sitting.
+ *
+ * Open while `attemptId` is null, spent once it is set. A learner has at most
+ * one open draw per quiz: the paper they are looking at right now.
+ */
+export type DrawRow = {
+  id: string;
+  quizId: string;
+  userId: string;
+  questionIds: string[];
+  attemptId: string | null;
 };
 
 /** A question with its options, and deliberately no correctness. */
@@ -238,6 +254,8 @@ export type QuizDraft = {
   instructions: string | null;
   passingScore: number;
   maxAttempts: number;
+  /** How many of the questions to ask, or null to ask all of them. */
+  drawSize?: number | null;
   questions: {
     id: string;
     prompt: string;
@@ -348,6 +366,19 @@ export type Store = {
   findQuizByLesson(lessonId: string): Promise<QuizRow | null>;
   /** The paper, with no correctness in it. */
   paperFor(quizId: string): Promise<PaperQuestion[]>;
+  /** Every question id on a quiz, in asking order — the bank to draw from. */
+  questionIdsFor(quizId: string): Promise<string[]>;
+  /** The learner's open draw for this quiz, if they have one. */
+  openDrawFor(quizId: string, userId: string): Promise<DrawRow | null>;
+  insertDraw(draw: {
+    id: string;
+    quizId: string;
+    userId: string;
+    questionIds: string[];
+    drawnAt: Date;
+  }): Promise<void>;
+  /** Ties an open draw to the attempt that used it, closing it. */
+  spendDraw(drawId: string, attemptId: string): Promise<void>;
   scoringQuestions(quizId: string): Promise<ScoringQuestion[]>;
   scoringOptions(quizId: string): Promise<ScoringOption[]>;
   attemptsFor(quizId: string, userId: string): Promise<AttemptRow[]>;

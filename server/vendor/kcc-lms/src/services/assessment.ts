@@ -15,7 +15,7 @@ import { hasAtLeast } from '../ports.js';
 import { LmsConflict, LmsForbidden, LmsInvalid, LmsNotFound } from '../errors.js';
 import { emit, type LmsContext } from '../context.js';
 import { requireEntitlement } from './enrolment.js';
-import type { AttemptRow, PaperQuestion, ScoringOption, ScoringQuestion } from '../store.js';
+import type { AttemptRow, PaperQuestion, QuizRow, ScoringOption, ScoringQuestion } from '../store.js';
 
 export type QuizPaper = {
   id: string;
@@ -41,13 +41,86 @@ async function quizWithCourse(context: LmsContext, quizId: string) {
 }
 
 /** The paper, as a learner gets it. */
+/**
+ * Pick `count` of `ids`, without replacement.
+ *
+ * A Fisher-Yates shuffle over a copy, stopping once enough have been taken.
+ * Deliberately not `sort(() => Math.random() - 0.5)`, which is the usual
+ * shortcut and is not a shuffle: comparison sorts assume a consistent
+ * comparator, and with a random one the result is biased towards the original
+ * order — which on a question bank means the same questions coming up far
+ * more often than the rest.
+ */
+function deal(ids: string[], count: number, random: () => number): string[] {
+  const pool = [...ids];
+  const take = Math.min(count, pool.length);
+  for (let i = 0; i < take; i += 1) {
+    const j = i + Math.floor(random() * (pool.length - i));
+    // Written out rather than destructured: under noUncheckedIndexedAccess a
+    // swap through index signatures is `string | undefined` on both sides.
+    const here = pool[i] as string;
+    const there = pool[j] as string;
+    pool[i] = there;
+    pool[j] = here;
+  }
+  return pool.slice(0, take);
+}
+
+/**
+ * The paper this learner is sitting, which is not always the whole quiz.
+ *
+ * With `drawSize` unset the quiz behaves as it always has: every question, in
+ * authoring order. With it set the quiz is a bank, and each learner is dealt
+ * that many of its questions.
+ *
+ * The draw is stored rather than made on the fly, because the paper is read
+ * in one request and answered in another. A draw made fresh each read would
+ * deal a new hand on every refresh, and the answers posted back would be
+ * marked against questions the learner was never shown. So: reuse the open
+ * draw if there is one, otherwise deal and write it down.
+ *
+ * Order is the draw's order, not the bank's, so two learners do not get the
+ * same questions in the same sequence either.
+ */
+async function dealtPaper(context: LmsContext, quiz: QuizRow): Promise<PaperQuestion[]> {
+  const all = await context.store.paperFor(quiz.id);
+  const size = quiz.drawSize;
+  // No bank, or a bank smaller than the hand asked for: ask everything, and
+  // do not write a draw for it — there is nothing to remember.
+  if (size === null || size <= 0 || size >= all.length) return all;
+
+  const open = await context.store.openDrawFor(quiz.id, context.viewer.id);
+  let chosen = open?.questionIds ?? [];
+
+  // A draw can outlive the questions it names, if authoring removed one
+  // between the paper being dealt and it being sat. Treat a draw that no
+  // longer resolves as spent and deal again rather than serving a short paper.
+  const byId = new Map(all.map((question) => [question.id, question]));
+  if (chosen.length === 0 || chosen.some((id) => !byId.has(id))) {
+    chosen = deal(
+      await context.store.questionIdsFor(quiz.id),
+      size,
+      context.random,
+    );
+    await context.store.insertDraw({
+      id: context.store.newId(),
+      quizId: quiz.id,
+      userId: context.viewer.id,
+      questionIds: chosen,
+      drawnAt: context.clock.now(),
+    });
+  }
+
+  return chosen.map((id) => byId.get(id)).filter((q): q is PaperQuestion => q !== undefined);
+}
+
 export async function getQuizPaper(context: LmsContext, lessonId: string): Promise<QuizPaper | null> {
   const quiz = await context.store.findQuizByLesson(lessonId);
   if (!quiz) return null;
 
   await quizWithCourse(context, quiz.id);
 
-  const questions = await context.store.paperFor(quiz.id);
+  const questions = await dealtPaper(context, quiz);
   const attempts = await context.store.attemptsFor(quiz.id, context.viewer.id);
 
   const attemptsTaken = attempts.length;
@@ -157,9 +230,33 @@ export async function submitAttempt(
     throw new LmsConflict('You have used all your attempts at this quiz.');
   }
 
-  const questions = await context.store.scoringQuestions(quiz.id);
-  if (questions.length === 0) throw new LmsInvalid('That quiz has no questions yet.');
+  const whole = await context.store.scoringQuestions(quiz.id);
+  if (whole.length === 0) throw new LmsInvalid('That quiz has no questions yet.');
   const options = await context.store.scoringOptions(quiz.id);
+
+  /*
+   * Mark the paper they sat, not the bank it came from.
+   *
+   * On a quiz with a draw, scoring against every question would count the
+   * ones they were never shown as unanswered and wrong — a learner could
+   * answer all ten of their ten correctly and be told they scored thirty per
+   * cent. So the open draw decides the question set, and spending it below
+   * ties it to this attempt.
+   */
+  const draw = quiz.drawSize === null ? null : await context.store.openDrawFor(quiz.id, context.viewer.id);
+  const drawn = draw === null ? null : new Set(draw.questionIds);
+  const questions = drawn === null ? whole : whole.filter((question) => drawn.has(question.id));
+  // `whole` was checked non-empty above, and with no draw `questions` is
+  // `whole`, so reaching this means a draw whose questions have all gone —
+  // authoring replaced them while this learner was sitting the paper. Saying
+  // "no questions" would be a lie about the quiz and leave them with nothing
+  // to do; reloading the lesson deals a fresh hand (see dealtPaper), so say
+  // that instead.
+  if (questions.length === 0) {
+    throw new LmsInvalid(
+      'This quiz changed while you were taking it. Reload the lesson to be given a fresh set of questions.',
+    );
+  }
 
   const marked = markAttempt({
     questions,
@@ -178,6 +275,10 @@ export async function submitAttempt(
     answers: marked.clean,
     submittedAt: context.clock.now(),
   });
+
+  // Closed only after the attempt exists, so a failure above leaves the draw
+  // open and the learner sitting the same paper rather than a new one.
+  if (draw !== null) await context.store.spendDraw(draw.id, attemptId);
 
   const attemptsLeft = quiz.maxAttempts === 0 ? null : Math.max(0, quiz.maxAttempts - (attemptsTaken + 1));
 

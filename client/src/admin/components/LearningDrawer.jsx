@@ -3,7 +3,7 @@
 // (what they're enrolled in + what else is on offer) is reachable from one
 // entry point. Clicking into an actual course closes the drawer and hands off
 // to the existing full-page views, which need the room a drawer doesn't have.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import Modal from '../../components/Modal.jsx';
 import api from '../../api/client.js';
@@ -17,28 +17,63 @@ export default function LearningDrawer({ show, onClose }) {
   const navigate = useNavigate();
   const [myCourses, setMyCourses] = useState([]);
   const [catalog, setCatalog] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [searching, setSearching] = useState(false);
+  const [browseFailed, setBrowseFailed] = useState(false);
+  const firstLoad = useRef(true);
 
   useEffect(() => {
     if (!show) return;
     let cancelled = false;
     setLoading(true);
     setError('');
-    Promise.all([
-      api.get('/portal/lms/courses').catch(() => ({ data: [] })),
-      api.get('/lms-checkout/courses').catch(() => ({ data: [] })),
-    ])
-      .then(([mine, all]) => {
-        if (cancelled) return;
-        const enrolledIds = new Set((mine.data || []).map((c) => c.id));
-        setMyCourses(mine.data || []);
-        setCatalog((all.data || []).filter((c) => !enrolledIds.has(c.id)));
-      })
+    api.get('/portal/lms/courses')
+      .then((mine) => { if (!cancelled) setMyCourses(mine.data || []); })
       .catch((e) => { if (!cancelled) setError(parseApiError(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [show]);
+
+  /*
+   * Browsing asks the server rather than the browser.
+   *
+   * This used to fetch /lms-checkout/courses — every published course, with
+   * the whole pricing table — and filter out the enrolled ones here. That is
+   * fine for a dozen courses and gets worse with every one added. The
+   * catalogue endpoint searches, pages, and marks what the learner is already
+   * on, so none of that has to cross the wire to be thrown away.
+   *
+   * Debounced, because it now runs on every keystroke.
+   */
+  useEffect(() => {
+    if (!show) return undefined;
+    let cancelled = false;
+    const wait = firstLoad.current ? 0 : 250;
+    firstLoad.current = false;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      api.get('/portal/lms/catalogue', { params: query.trim() ? { query: query.trim() } : {} })
+        .then((r) => {
+          if (cancelled) return;
+          const body = r.data || {};
+          setCatalog((body.items || []).filter((c) => !c.enrolled));
+          setTotal(body.total || 0);
+          setBrowseFailed(false);
+        })
+        /*
+         * A failed request is not an empty catalogue, and must not be shown
+         * as one. Swallowing it would tell somebody there are no courses on
+         * offer when the truth is that we could not find out — and they would
+         * believe it, because the sentence reads like an answer.
+         */
+        .catch(() => { if (!cancelled) { setCatalog([]); setBrowseFailed(true); } })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, wait);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [show, query]);
 
   function goToCourse(slug) {
     onClose();
@@ -87,9 +122,42 @@ export default function LearningDrawer({ show, onClose }) {
             </div>
           )}
 
-          <h6 className="fw-bold mb-2">Browse Courses</h6>
-          {catalog.length === 0 ? (
-            <div className="text-muted small">No other courses are available right now.</div>
+          <div className="d-flex justify-content-between align-items-center mb-2">
+            <h6 className="fw-bold mb-0">Browse Courses</h6>
+            {/*
+              `total` is what matches the current filters, not how many
+              courses exist — so it cannot be labelled "published" once
+              somebody has typed in the box. It also counts courses the
+              learner is already enrolled on, which are filtered out of the
+              list below, so it is deliberately described as the catalogue
+              rather than as the number of cards on screen.
+            */}
+            {total > 0 && (
+              <span className="text-muted small">
+                {query.trim() ? `${total} match` : `${total} in the catalogue`}
+              </span>
+            )}
+          </div>
+          <div className="mb-2">
+            <input
+              type="search"
+              className="form-control form-control-sm"
+              placeholder="Search courses"
+              aria-label="Search courses"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          {searching && catalog.length === 0 ? (
+            <div className="text-muted small">Searching&hellip;</div>
+          ) : browseFailed ? (
+            <div className="alert alert-warning py-2 small mb-0">
+              Could not load the course list just now. Your own courses above are unaffected.
+            </div>
+          ) : catalog.length === 0 ? (
+            <div className="text-muted small">
+              {query.trim() ? 'Nothing matches that.' : 'No other courses are available right now.'}
+            </div>
           ) : (
             <div className="d-flex flex-column gap-2">
               {catalog.map((c) => (

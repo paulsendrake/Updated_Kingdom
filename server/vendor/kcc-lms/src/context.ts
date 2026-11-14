@@ -14,6 +14,8 @@ export type LmsContext = {
   viewer: Viewer;
   ports: LmsPorts;
   clock: ClockPort;
+  /** [0, 1), replaceable so a dealt paper can be asserted. */
+  random: () => number;
 };
 
 /**
@@ -30,6 +32,7 @@ export function lmsContext(input: { store: Store; viewer: Viewer; ports?: LmsPor
     viewer: input.viewer,
     ports,
     clock: ports.clock ?? systemClock,
+    random: ports.random ?? Math.random,
   };
 }
 
