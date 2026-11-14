@@ -130,8 +130,9 @@ function AssignmentSubmission({ lessonId, onGraded }) {
   const [bodyText, setBodyText] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // Returns its promise so submit() can wait for it; see below.
   function load() {
-    api.get(`/portal/lms/lessons/${lessonId}/submissions`)
+    return api.get(`/portal/lms/lessons/${lessonId}/submissions`)
       .then((r) => setLatest(r.data?.[0] || null))
       .catch(() => setLatest(null));
   }
@@ -143,7 +144,19 @@ function AssignmentSubmission({ lessonId, onGraded }) {
     try {
       await api.post(`/portal/lms/lessons/${lessonId}/submissions`, { bodyText: bodyText.trim() });
       toast('Submitted — you’ll see your mark here once it’s reviewed.', 'success');
-      load();
+      /*
+       * Awaited, and the box cleared, to close a double-submit window.
+       *
+       * `load()` used to be fired and not waited for, so `finally` re-enabled
+       * the button while `latest` was still the old value — leaving the form
+       * on screen, with the text still in it, for as long as the reload took.
+       * A second click there is a second row: lms_lesson_submissions has no
+       * unique key on (lesson_id, contact_id) and the insert is a plain
+       * INSERT, so nothing below this line would have stopped it, and the
+       * assignment would appear twice on a marker's queue.
+       */
+      setBodyText('');
+      await load();
     } catch (e) {
       toast(parseApiError(e), 'error');
     } finally {
@@ -152,6 +165,33 @@ function AssignmentSubmission({ lessonId, onGraded }) {
   }
 
   if (latest === undefined) return <div className="text-muted small">Loading submission…</div>;
+
+  /*
+   * What they wrote, shown back to them.
+   *
+   * Both states below used to be dead ends: "waiting to be marked" and
+   * nothing else, or a score and feedback and nothing else. The work itself
+   * was never shown back, so somebody reading "this does not answer the
+   * second part" had no way to see what they had said, and somebody waiting
+   * on a mark could not check what they had sent. The endpoint has been
+   * returning body_text and submitted_at the whole time; the component
+   * fetched them and used neither.
+   *
+   * Collapsed behind a <details> rather than always open, because the mark
+   * and the feedback are what somebody came for and their own essay pushing
+   * those off the screen would be a different complaint.
+   */
+  const submittedWork = latest?.body_text ? (
+    <details className="mt-2">
+      <summary className="small text-muted" style={{ cursor: 'pointer' }}>
+        What you submitted
+        {latest.submitted_at ? ` \u00b7 ${new Date(latest.submitted_at).toLocaleString()}` : ''}
+      </summary>
+      <div className="small mt-2 p-2 bg-body-secondary rounded" style={{ whiteSpace: 'pre-wrap' }}>
+        {latest.body_text}
+      </div>
+    </details>
+  ) : null;
 
   if (latest?.status === 'graded') {
     return (
@@ -162,6 +202,7 @@ function AssignmentSubmission({ lessonId, onGraded }) {
             <h6 className="fw-bold mb-0">Marked — {latest.score}%</h6>
           </div>
           {latest.feedback && <p className="mb-0">{latest.feedback}</p>}
+          {submittedWork}
         </div>
       </div>
     );
@@ -170,8 +211,11 @@ function AssignmentSubmission({ lessonId, onGraded }) {
   if (latest?.status === 'pending') {
     return (
       <div className="alert alert-secondary mb-3">
-        <iconify-icon icon="solar:clock-circle-line-duotone" class="me-1"></iconify-icon>
-        Submitted — waiting to be marked.
+        <div>
+          <iconify-icon icon="solar:clock-circle-line-duotone" class="me-1"></iconify-icon>
+          Submitted — waiting to be marked.
+        </div>
+        {submittedWork}
       </div>
     );
   }
@@ -218,17 +262,43 @@ export default function PortalLessonView() {
     lastReportedRef.current = s;
     postProgress(lesson.id, s);
   }
+  /*
+   * Flush the watch time when the lesson changes, not only on unmount.
+   *
+   * The final report used to hang off an effect with no dependencies, which
+   * fires its cleanup only when the component actually unmounts. This route
+   * is `learning/:courseSlug/:lessonSlug` with one element, so React Router
+   * reuses the component when moving from one lesson to the next: it does
+   * not unmount, and the cleanup did not run. Two things followed.
+   *
+   * Anything under the ten-second throttle was simply lost — watch seven
+   * seconds, click the next lesson, and nothing was ever recorded.
+   *
+   * Worse, `currentTimeRef` was not cleared, so those seven seconds stayed in
+   * it while `lessonIdRef` moved on to the new lesson. The next flush posted
+   * one lesson's watch time against another. Progress that is wrong is worse
+   * than progress that is missing: it is invisible, and it is what a report
+   * to a cohort leader is built from.
+   *
+   * Keying the effect on the lesson id fixes both. The id is captured in the
+   * closure, so the cleanup always posts to the lesson it belongs to, and
+   * React runs it on a change and on unmount alike.
+   */
   useEffect(() => {
-    lessonIdRef.current = lesson?.id || null;
+    const id = lesson?.id;
+    if (!id) return undefined;
+    lessonIdRef.current = id;
+    currentTimeRef.current = 0;
+    lastReportedRef.current = 0;
+    return () => {
+      if (currentTimeRef.current > 0) postProgress(id, currentTimeRef.current);
+      currentTimeRef.current = 0;
+    };
   }, [lesson?.id]);
-  useEffect(() => () => {
-    if (lessonIdRef.current && currentTimeRef.current > 0) postProgress(lessonIdRef.current, currentTimeRef.current);
-  }, []);
 
   useEffect(() => {
     setLoading(true);
     setError('');
-    lastReportedRef.current = 0;
     api.get(`/portal/lms/courses/${courseSlug}/lessons/${lessonSlug}`)
       .then((r) => setLesson(r.data))
       .catch((e) => setError(parseApiError(e)))
